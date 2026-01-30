@@ -83,14 +83,17 @@ with app.app_context():
     # Auto-migrate: Add email column if it doesn't exist
     from sqlalchemy import inspect
     inspector = inspect(db.engine)
-    columns = [col['name'] for col in inspector.get_columns('people')]
 
-    if 'email' not in columns:
-        app.logger.info("Running migration: adding email column to people table")
-        with db.engine.connect() as conn:
-            conn.execute(db.text("ALTER TABLE people ADD COLUMN email VARCHAR"))
-            conn.commit()
-        app.logger.info("Migration complete: email column added")
+    # Check if people table exists
+    if 'people' in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns('people')]
+
+        if 'email' not in columns:
+            app.logger.info("Running migration: adding email column to people table")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE people ADD COLUMN email VARCHAR"))
+                conn.commit()
+            app.logger.info("Migration complete: email column added")
 
     db.create_all()
     if Person.query.count() == 0:
