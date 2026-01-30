@@ -97,15 +97,51 @@ with app.app_context():
 
     db.create_all()
     if Person.query.count() == 0:
-        
-        vidya_schedule = {"0": 3, "1": 0, "2": 3, "3": 0, "4": 4, "5": 0, "6": 0}  # Mon..Sun mapping by index (Mon=0)
-        ariel_schedule = {"0": 3, "1": 3, "2": 3, "3": 0, "4": 0, "5": 0, "6": 0}
-        ray_schedule = {"0": 0, "1": 2, "2": 0, "3": 0, "4": 4, "5": 0, "6": 0}
-        viveka_schedule = {"0": 0, "1": 2.5, "2": 0, "3": 3, "4": 3, "5": 0, "6": 0}
-        melinda_schedule = {"0": 0, "1": 1.5, "2": 1, "3": 1.5, "4": 6, "5": 0, "6": 0}
+        # Define team members with their schedules and emails
+        team_members = [
+            {
+                "name": "Vidya",
+                "email": "vidya22@sas.upenn.edu",
+                "schedule": {"0": 3, "1": 0, "2": 3, "3": 0, "4": 4, "5": 0, "6": 0}
+            },
+            {
+                "name": "Ariel",
+                "email": "fariel@sas.upenn.edu",
+                "schedule": {"0": 3, "1": 3, "2": 3, "3": 0, "4": 0, "5": 0, "6": 0}
+            },
+            {
+                "name": "Ray",
+                "email": "ruitian@wharton.upenn.edu",
+                "schedule": {"0": 0, "1": 2, "2": 0, "3": 0, "4": 4, "5": 0, "6": 0}
+            },
+            {
+                "name": "Viveka",
+                "email": "vsinha@wharton.upenn.edu",
+                "schedule": {"0": 0, "1": 2.5, "2": 0, "3": 3, "4": 3, "5": 0, "6": 0}
+            },
+            {
+                "name": "Melinda",
+                "email": "melimei@wharton.upenn.edu",
+                "schedule": {"0": 0, "1": 1.5, "2": 1, "3": 1.5, "4": 6, "5": 0, "6": 0}
+            },
+            {
+                "name": "Lila",
+                "email": "ldimasi@wharton.upenn.edu",
+                "schedule": {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "6": 0}
+            },
+            {
+                "name": "Kevin",
+                "email": "kvzhu@wharton.upenn.edu",
+                "schedule": {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "6": 0}
+            }
+        ]
 
-        for name in ["Vidya", "Ariel", "Ray", "Viveka", "Melinda", "Lila (Test)", "Kevin (Test)"]:
-            db.session.add(Person(name=name, weekly_hours=json.dumps(locals()[f"{name.lower()}_schedule"])))
+        for member in team_members:
+            db.session.add(Person(
+                name=member["name"],
+                email=member["email"],
+                weekly_hours=json.dumps(member["schedule"])
+            ))
         db.session.commit()
 
 # -----------------------------
