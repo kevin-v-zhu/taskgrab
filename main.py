@@ -28,6 +28,15 @@ app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///taskboard.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# Email Configuration
+app.config['MAIL_ENABLED'] = os.environ.get('MAIL_ENABLED', 'false').lower() == 'true'
+app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
+app.config['MAIL_PORT'] = int(os.environ.get('MAIL_PORT', '587'))
+app.config['MAIL_USE_TLS'] = os.environ.get('MAIL_USE_TLS', 'true').lower() == 'true'
+app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', '')
+app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', '')
+app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_DEFAULT_SENDER', '')
+
 db = SQLAlchemy(app)
 
 # -----------------------------
@@ -37,6 +46,7 @@ class Person(db.Model):
     __tablename__ = 'people'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String, nullable=False, unique=True)
+    email = db.Column(db.String, nullable=True)
     # weekly_hours JSON mapping weekday index 0..6 -> float hours available that day
     weekly_hours = db.Column(db.Text, nullable=False, default='{}')
 
@@ -70,6 +80,18 @@ class ScheduledBlock(db.Model):
 # DB init / seed
 # -----------------------------
 with app.app_context():
+    # Auto-migrate: Add email column if it doesn't exist
+    from sqlalchemy import inspect
+    inspector = inspect(db.engine)
+    columns = [col['name'] for col in inspector.get_columns('people')]
+
+    if 'email' not in columns:
+        app.logger.info("Running migration: adding email column to people table")
+        with db.engine.connect() as conn:
+            conn.execute(db.text("ALTER TABLE people ADD COLUMN email VARCHAR"))
+            conn.commit()
+        app.logger.info("Migration complete: email column added")
+
     db.create_all()
     if Person.query.count() == 0:
         
@@ -78,10 +100,8 @@ with app.app_context():
         ray_schedule = {"0": 0, "1": 2, "2": 0, "3": 0, "4": 4, "5": 0, "6": 0}
         viveka_schedule = {"0": 0, "1": 2.5, "2": 0, "3": 3, "4": 3, "5": 0, "6": 0}
         melinda_schedule = {"0": 0, "1": 1.5, "2": 1, "3": 1.5, "4": 6, "5": 0, "6": 0}
-        collin_schedule = {"0": 10, "1": 10, "2": 10, "3": 10, "4": 10, "5": 10, "6": 10}
-        andrew_schedule = {"0": 4, "1": 0, "2": 8, "3": 0, "4": 8, "5": 0, "6": 0}
 
-        for name in ["Vidya", "Ariel", "Ray", "Viveka", "Melinda", "Collin", "Andrew"]:
+        for name in ["Vidya", "Ariel", "Ray", "Viveka", "Melinda", "Lila (Test)", "Kevin (Test)"]:
             db.session.add(Person(name=name, weekly_hours=json.dumps(locals()[f"{name.lower()}_schedule"])))
         db.session.commit()
 
@@ -97,6 +117,215 @@ def parse_date(s: str | None) -> date | None:
         return datetime.strptime(s, '%Y-%m-%d').date()
     except ValueError:
         return None
+
+
+# -----------------------------
+# Email Service
+# -----------------------------
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+def send_email(to_addresses, subject, body_plain, body_html=None):
+    """
+    Send email with error handling. Returns True if successful, False otherwise.
+    """
+    if not app.config['MAIL_ENABLED']:
+        app.logger.info(f"Email disabled. Would send to {to_addresses}: {subject}")
+        return False
+
+    if not app.config['MAIL_USERNAME'] or not app.config['MAIL_PASSWORD']:
+        app.logger.warning("Email credentials not configured")
+        return False
+
+    # Normalize to list
+    if isinstance(to_addresses, str):
+        to_addresses = [to_addresses]
+
+    # Filter out None and empty emails
+    to_addresses = [email for email in to_addresses if email and email.strip()]
+
+    if not to_addresses:
+        app.logger.info("No valid email addresses to send to")
+        return False
+
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['From'] = app.config['MAIL_DEFAULT_SENDER']
+        msg['To'] = ', '.join(to_addresses)
+        msg['Subject'] = subject
+
+        # Attach plain text
+        msg.attach(MIMEText(body_plain, 'plain'))
+
+        # Attach HTML if provided
+        if body_html:
+            msg.attach(MIMEText(body_html, 'html'))
+
+        # Connect and send
+        server = smtplib.SMTP(app.config['MAIL_SERVER'], app.config['MAIL_PORT'])
+        server.starttls()
+        server.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
+        server.sendmail(app.config['MAIL_DEFAULT_SENDER'], to_addresses, msg.as_string())
+        server.quit()
+
+        app.logger.info(f"Email sent successfully to {to_addresses}: {subject}")
+        return True
+
+    except Exception as e:
+        app.logger.error(f"Failed to send email to {to_addresses}: {str(e)}")
+        return False
+
+
+def send_task_assigned_email(task, person):
+    """Send email when a task is assigned to a person."""
+    if not person.email:
+        return False
+
+    subject = f"Task Assigned: {task.title}"
+
+    due_text = f"Due: {task.due_date.strftime('%B %d, %Y')}" if task.due_date else "No due date"
+    est_text = f"{task.estimated_hours:.2f} hours" if task.estimated_hours else "No estimate"
+
+    body_plain = f"""Hi {person.name},
+
+You have been assigned a new task:
+
+Task: {task.title}
+{due_text}
+Estimated: {est_text}
+
+{task.description or 'No description provided.'}
+
+View full details at your taskboard.
+
+---
+Taskgrab Notification System
+"""
+
+    body_html = f"""
+<html>
+<body style="font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #333;">
+    <h2 style="color: #2563eb;">Task Assigned to You</h2>
+    <div style="background: #f9fafb; padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #2563eb;">
+        <h3 style="margin-top: 0;">{task.title}</h3>
+        <p><strong>{due_text}</strong> · Estimated: {est_text}</p>
+        {f'<p>{task.description}</p>' if task.description else ''}
+    </div>
+    <hr style="border: none; border-top: 1px solid #e5e5e5; margin: 2rem 0;">
+    <p style="color: #666; font-size: 0.875rem;">Taskgrab Notification System</p>
+</body>
+</html>
+"""
+
+    return send_email(person.email, subject, body_plain, body_html)
+
+
+def send_task_reassigned_email(task, old_person, new_person):
+    """Send emails when task is reassigned from one person to another."""
+    results = []
+
+    # Notify old assignee (task removed)
+    if old_person and old_person.email:
+        subject = f"Task Unassigned: {task.title}"
+        body_plain = f"""Hi {old_person.name},
+
+The task "{task.title}" has been reassigned to {new_person.name if new_person else 'someone else'}.
+
+---
+Taskgrab Notification System
+"""
+        body_html = f"""
+<html>
+<body style="font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #333;">
+    <h2 style="color: #666;">Task Reassigned</h2>
+    <p>The task <strong>{task.title}</strong> has been reassigned to {new_person.name if new_person else 'someone else'}.</p>
+    <p style="color: #666; font-size: 0.875rem;">Taskgrab Notification System</p>
+</body>
+</html>
+"""
+        results.append(send_email(old_person.email, subject, body_plain, body_html))
+
+    # Notify new assignee (task assigned)
+    if new_person:
+        results.append(send_task_assigned_email(task, new_person))
+
+    return any(results)
+
+
+def send_task_up_for_grabs_email(task):
+    """Send email to everyone when task is marked 'up for grabs'."""
+    all_people = Person.query.all()
+    email_addresses = [p.email for p in all_people if p.email]
+
+    if not email_addresses:
+        return False
+
+    subject = f"Task Up For Grabs: {task.title}"
+
+    due_text = f"Due: {task.due_date.strftime('%B %d, %Y')}" if task.due_date else "No due date"
+    est_text = f"{task.estimated_hours:.2f} hours" if task.estimated_hours else "No estimate"
+
+    body_plain = f"""Team,
+
+A task is now up for grabs:
+
+Task: {task.title}
+{due_text}
+Estimated: {est_text}
+
+{task.description or 'No description provided.'}
+
+View and claim it on the taskboard.
+
+---
+Taskgrab Notification System
+"""
+
+    body_html = f"""
+<html>
+<body style="font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #333;">
+    <h2 style="color: #f59e0b;">Task Up For Grabs</h2>
+    <div style="background: #fff7cc; padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #f59e0b;">
+        <h3 style="margin-top: 0;">{task.title}</h3>
+        <p><strong>{due_text}</strong> · Estimated: {est_text}</p>
+        {f'<p>{task.description}</p>' if task.description else ''}
+    </div>
+    <hr style="border: none; border-top: 1px solid #e5e5e5; margin: 2rem 0;">
+    <p style="color: #666; font-size: 0.875rem;">Taskgrab Notification System</p>
+</body>
+</html>
+"""
+
+    return send_email(email_addresses, subject, body_plain, body_html)
+
+
+def send_task_completed_email(task):
+    """Send email to assignee when task is marked complete."""
+    if not task.assignee or not task.assignee.email:
+        return False
+
+    subject = f"Task Completed: {task.title}"
+
+    body_plain = f"""Hi {task.assignee.name},
+
+Congratulations! The task "{task.title}" has been marked as completed.
+
+---
+Taskgrab Notification System
+"""
+
+    body_html = f"""
+<html>
+<body style="font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #333;">
+    <h2 style="color: #10b981;">Task Completed!</h2>
+    <p>Congratulations! The task <strong>{task.title}</strong> has been marked as completed.</p>
+    <p style="color: #666; font-size: 0.875rem;">Taskgrab Notification System</p>
+</body>
+</html>
+"""
+
+    return send_email(task.assignee.email, subject, body_plain, body_html)
 
 
 def person_remaining_capacity_on_day(person_id: int, day: date) -> float:
@@ -213,6 +442,10 @@ def api_create_task():
 
     if assignee_id:
         auto_schedule_task(task)
+        # Send assignment email
+        person = Person.query.get(assignee_id)
+        if person:
+            send_task_assigned_email(task, person)
 
     return redirect(url_for('index'))
 
@@ -235,16 +468,39 @@ def api_update_task(task_id: int):
 
     if 'assignee_id' in data:
         raw = data.get('assignee_id')
+        old_assignee_id = task.assignee_id
+        old_assignee = Person.query.get(old_assignee_id) if old_assignee_id else None
+
         if raw and str(raw) != '-1':
             person = Person.query.get(int(raw))
             if person:
                 task.assignee_id = person.id
                 task.up_for_grabs = False
+                new_assignee = person
         else:
             task.assignee_id = None
             task.up_for_grabs = True
+            new_assignee = None
+
+        assignee_changed = old_assignee_id != task.assignee_id
+    else:
+        assignee_changed = False
+        old_assignee = None
+        new_assignee = None
 
     db.session.commit()
+
+    # Send email notifications for assignee changes
+    if assignee_changed:
+        if task.up_for_grabs:
+            # Task set to "up for grabs" - notify everyone
+            send_task_up_for_grabs_email(task)
+        elif old_assignee_id and task.assignee_id:
+            # Reassigned from one person to another
+            send_task_reassigned_email(task, old_assignee, new_assignee)
+        elif not old_assignee_id and task.assignee_id:
+            # Newly assigned (was up for grabs, now has assignee)
+            send_task_assigned_email(task, new_assignee)
 
     # optional reschedule toggle
     if (data.get('reschedule') == '1') and task.assignee_id:
@@ -257,6 +513,8 @@ def api_complete_task(task_id: int):
     task = Task.query.get_or_404(task_id)
     task.status = 'completed'
     db.session.commit()
+    # Send completion email
+    send_task_completed_email(task)
     return redirect(url_for('archive'))
 
 @app.post('/api/tasks/<int:task_id>/delete')
