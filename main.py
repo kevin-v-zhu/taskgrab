@@ -98,11 +98,14 @@ with app.app_context():
     db.create_all()
     if Person.query.count() == 0:
         # Define team members with their schedules and emails
+
+        # Day 0 = Monday
+
         team_members = [
             {
                 "name": "Vidya",
                 "email": "vidya22@sas.upenn.edu",
-                "schedule": {"0": 3, "1": 0, "2": 3, "3": 0, "4": 4, "5": 0, "6": 0}
+                "schedule": {"0": 4, "1": 0, "2": 3, "3": 0, "4": 4, "5": 0, "6": 0}
             },
             {
                 "name": "Ariel",
@@ -480,7 +483,6 @@ def api_create_task():
     db.session.commit()
 
     if assignee_id:
-        auto_schedule_task(task)
         # Send assignment email
         person = Person.query.get(assignee_id)
         if person:
@@ -540,10 +542,6 @@ def api_update_task(task_id: int):
         elif not old_assignee_id and task.assignee_id:
             # Newly assigned (was up for grabs, now has assignee)
             send_task_assigned_email(task, new_assignee)
-
-    # optional reschedule toggle
-    if (data.get('reschedule') == '1') and task.assignee_id:
-        auto_schedule_task(task)
 
     return redirect(url_for('task_detail', task_id=task.id))
 
@@ -686,12 +684,6 @@ INDEX_HTML = """
         {% if t.estimated_hours %} · Est: {{ '%.2f'|format(t.estimated_hours) }}h{% endif %}
       </div>
       {% if t.description %}<div style="margin-top:.4rem;">{{ t.description }}</div>{% endif %}
-      {% set sched = json.loads(t.scheduled_json) %}
-      {% if sched %}
-      <div class="small" style="margin-top:.4rem;">Schedule: 
-        {% for b in sched %}{{ b.date }} ({{ b.hours }}h){% if not loop.last %}, {% endif %}{% endfor %}
-      </div>
-      {% endif %}
       <form method="post" action="{{ url_for('api_complete_task', task_id=t.id) }}" style="margin-top:.6rem; display:flex; gap:.5rem;">
         <button>Mark complete</button>
         <form method="post" action="{{ url_for('api_delete_task', task_id=t.id) }}">
@@ -700,6 +692,50 @@ INDEX_HTML = """
       </form>
     </div>
     {% endfor %}
+  </div>
+
+  <hr style="margin-top:2rem;">
+
+  <h2>Weekly Schedule</h2>
+  <div class="schedule-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:1rem; margin-top:1rem;">
+    <div class="schedule-day">
+      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Monday</h3>
+      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
+        <li>Ariel: 1-5</li>
+        <li>Viveka: 1:30-3:30</li>
+      </ul>
+    </div>
+    <div class="schedule-day">
+      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Tuesday</h3>
+      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
+        <li>Melinda: 12-3</li>
+        <li>Vidya: 12-3</li>
+      </ul>
+    </div>
+    <div class="schedule-day">
+      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Wednesday</h3>
+      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
+        <li>Viveka: 1:30-3:30</li>
+        <li>Ray: 3:15-5:00</li>
+      </ul>
+    </div>
+    <div class="schedule-day">
+      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Thursday</h3>
+      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
+        <li>Melinda: 10-3</li>
+        <li>Viveka: 11:45-1:45</li>
+      </ul>
+    </div>
+    <div class="schedule-day">
+      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Friday</h3>
+      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
+        <li>Ray: 10-2</li>
+        <li>Vidya: 11-2</li>
+        <li>Melinda: 3-5</li>
+        <li>Viveka: 1-5</li>
+        <li>Ariel: 2-5</li>
+      </ul>
+    </div>
   </div>
 </div>
 </body>
