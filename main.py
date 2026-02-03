@@ -237,6 +237,36 @@ with app.app_context():
 # Utilities
 # -----------------------------
 WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+WEEKDAY_FULL_LABELS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+# EST Timezone support
+EST = tz.gettz('America/New_York')
+
+def get_est_now() -> datetime:
+    """Get current datetime in EST timezone."""
+    return datetime.now(EST)
+
+def get_est_today() -> date:
+    """Get current date in EST timezone."""
+    return get_est_now().date()
+
+def get_week_dates(start_date: date = None) -> list[date]:
+    """Get list of dates for a week starting from start_date (or current week if None).
+    Returns Monday through Sunday of that week.
+    """
+    if start_date is None:
+        start_date = get_est_today()
+    # Find the Monday of this week
+    monday = start_date - timedelta(days=start_date.weekday())
+    return [monday + timedelta(days=i) for i in range(7)]
+
+def get_two_weeks_dates(start_date: date = None) -> list[date]:
+    """Get list of dates for current week and next week (14 days starting from Monday)."""
+    if start_date is None:
+        start_date = get_est_today()
+    # Find the Monday of this week
+    monday = start_date - timedelta(days=start_date.weekday())
+    return [monday + timedelta(days=i) for i in range(14)]
 
 def parse_date(s: str | None) -> date | None:
     if not s:
@@ -245,6 +275,18 @@ def parse_date(s: str | None) -> date | None:
         return datetime.strptime(s, '%Y-%m-%d').date()
     except ValueError:
         return None
+
+def format_time_12h(time_str: str) -> str:
+    """Convert 24-hour time string (HH:MM) to 12-hour AM/PM format."""
+    try:
+        t = datetime.strptime(time_str, '%H:%M')
+        return t.strftime('%I:%M %p').lstrip('0').replace(' 0', ' ')
+    except ValueError:
+        return time_str  # Return as-is if parsing fails
+
+def format_time_range_12h(start: str, end: str) -> str:
+    """Format a time range in 12-hour AM/PM format."""
+    return f"{format_time_12h(start)} - {format_time_12h(end)}"
 
 
 # -----------------------------
@@ -479,7 +521,7 @@ def person_total_capacity_before_date(person_id: int, before_date: date, start_d
     if not person:
         return 0.0
     if start_date is None:
-        start_date = date.today()
+        start_date = get_est_today()
     if before_date <= start_date:
         return 0.0
 
@@ -516,7 +558,7 @@ def reschedule_all_tasks_for_person(person_id: int):
         task.scheduling_flag = None
         task.scheduling_message = None
 
-    today = date.today()
+    today = get_est_today()
 
     # Schedule each task in priority order
     for task in tasks:
@@ -602,7 +644,7 @@ def find_best_assignee(estimated_hours: float, due_date: date = None) -> int | N
     if not people:
         return None
 
-    today = date.today()
+    today = get_est_today()
     best_person_id = None
     best_capacity = 0.0
     best_can_complete = False
@@ -638,7 +680,7 @@ def task_css(task: Task) -> str:
     if task.up_for_grabs:
         classes.append("up-for-grabs")
     # overdue
-    if task.due_date and task.status not in ('complete', 'completed') and date.today() > task.due_date:
+    if task.due_date and task.status not in ('complete', 'completed') and get_est_today() > task.due_date:
         classes.append("overdue")
     # status class
     status = task.status or 'assigned'
@@ -656,6 +698,12 @@ def index():
     tasks = Task.query.filter(Task.status != 'archived').order_by(Task.id.desc()).all()
     people = Person.query.order_by(Person.name).all()
 
+    # Get current EST date/time and two weeks of dates
+    est_now = get_est_now()
+    est_today = est_now.date()
+    est_datetime = est_now.strftime('%a, %b %d, %Y %I:%M %p')
+    two_weeks = get_two_weeks_dates(est_today)
+
     # Prepare JSON for JavaScript
     people_json = json.dumps([{
         'id': p.id,
@@ -668,12 +716,19 @@ def index():
         'title': t.title,
         'assignee_id': t.assignee_id,
         'status': t.status,
-        'scheduled_json': t.scheduled_json
+        'scheduled_json': t.scheduled_json,
+        'scheduling_flag': t.scheduling_flag
     } for t in tasks])
 
+    two_weeks_dates_json = json.dumps([d.isoformat() for d in two_weeks])
+
     return render_template_string(INDEX_HTML, tasks=tasks, people=people, task_css=task_css,
-                                  WEEKDAY_LABELS=WEEKDAY_LABELS, json=json, today=date.today(),
-                                  people_json=people_json, tasks_json=tasks_json)
+                                  WEEKDAY_LABELS=WEEKDAY_LABELS, json=json, today=est_today,
+                                  people_json=people_json, tasks_json=tasks_json,
+                                  two_weeks_dates_json=two_weeks_dates_json,
+                                  est_today=est_today.isoformat(),
+                                  est_datetime=est_datetime,
+                                  format_time_12h=format_time_12h)
 
 @app.route('/archive')
 def archive():
@@ -969,7 +1024,8 @@ INDEX_HTML = """
 <body>
 <header>
   <h1>Taskboard</h1>
-  <div class="controls">
+  <div style="font-size:0.8rem; color:#666; margin-left:1rem;">{{ est_datetime }} EST</div>
+  <div class="controls" style="margin-left:auto;">
     <button onclick="document.getElementById('newTask').toggleAttribute('hidden')">＋ New Task</button>
     <a class="btn" href="{{ url_for('archive') }}">Completed Tasks</a>
   </div>
@@ -1064,7 +1120,7 @@ INDEX_HTML = """
         {% for p in people %}
           {% set slots = json.loads(p.time_slots or '{}').get(day_idx|string, []) %}
           {% for slot in slots %}
-            <li>{{ p.name }}: {{ slot.start }}-{{ slot.end }}</li>
+            <li>{{ p.name }}: {{ format_time_12h(slot.start) }} - {{ format_time_12h(slot.end) }}</li>
           {% endfor %}
         {% endfor %}
       </ul>
@@ -1074,7 +1130,7 @@ INDEX_HTML = """
 
   <hr style="margin-top:2rem;">
 
-  <h2>Individual RA Schedule</h2>
+  <h2>Individual RA Schedule (2 Weeks)</h2>
   <div style="margin-top:1rem;">
     <select id="ra-selector" onchange="showRASchedule(this.value)" style="margin-bottom:1rem;">
       <option value="">Select an RA to view their schedule...</option>
@@ -1088,7 +1144,28 @@ INDEX_HTML = """
   <script>
     const peopleData = {{ people_json|safe }};
     const tasksData = {{ tasks_json|safe }};
-    const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+    const twoWeeksDates = {{ two_weeks_dates_json|safe }};
+    const estToday = '{{ est_today }}';
+    const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    function formatDate(dateStr) {
+      const d = new Date(dateStr + 'T12:00:00');
+      const month = d.toLocaleString('en-US', { month: 'short' });
+      const day = d.getDate();
+      return month + ' ' + day;
+    }
+
+    function formatTime12h(timeStr) {
+      // Convert HH:MM to 12-hour AM/PM format
+      const [hours, minutes] = timeStr.split(':').map(Number);
+      const period = hours >= 12 ? 'PM' : 'AM';
+      const hour12 = hours % 12 || 12;
+      return hour12 + ':' + (minutes < 10 ? '0' : '') + minutes + ' ' + period;
+    }
+
+    function formatTimeRange(start, end) {
+      return formatTime12h(start) + ' - ' + formatTime12h(end);
+    }
 
     function showRASchedule(personId) {
       const container = document.getElementById('ra-schedule-view');
@@ -1106,48 +1183,110 @@ INDEX_HTML = """
       const slots = person.time_slots || {};
       const personTasks = tasksData.filter(t => t.assignee_id == personId && t.status !== 'complete' && t.status !== 'completed');
 
-      let html = '<div class="schedule-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:1rem;">';
+      // Split into two weeks (first 7 days = week 1, next 7 days = week 2)
+      const week1Dates = twoWeeksDates.slice(0, 7);
+      const week2Dates = twoWeeksDates.slice(7, 14);
 
-      for (let dayIdx = 0; dayIdx < 5; dayIdx++) {
-        const daySlots = slots[dayIdx.toString()] || [];
-        html += '<div class="schedule-day" style="background:#f9fafb; padding:0.75rem; border-radius:0.5rem;">';
-        html += '<h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">' + WEEKDAYS[dayIdx] + '</h3>';
+      let html = '';
+
+      // Week 1 - Current Week
+      html += '<h3 style="margin:1rem 0 0.5rem 0; font-size:1rem; color:#333;">This Week</h3>';
+      html += '<div class="schedule-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:0.75rem; margin-bottom:1.5rem;">';
+
+      week1Dates.forEach((dateStr, idx) => {
+        // Only show Monday-Friday (idx 0-4)
+        if (idx > 4) return;
+
+        const d = new Date(dateStr + 'T12:00:00');
+        const dayIdx = d.getDay(); // 0=Sun, 1=Mon, etc.
+        const weekdayIdx = (dayIdx === 0) ? 6 : dayIdx - 1; // Convert to 0=Mon format
+        const daySlots = slots[weekdayIdx.toString()] || [];
+        const isToday = dateStr === estToday;
+
+        html += '<div class="schedule-day" style="background:' + (isToday ? '#dbeafe' : '#f9fafb') + '; padding:0.75rem; border-radius:0.5rem;' + (isToday ? ' border:2px solid #3b82f6;' : '') + '">';
+        html += '<h4 style="margin:0 0 0.25rem 0; font-size:0.9rem; color:#2563eb;">' + WEEKDAYS[dayIdx] + '</h4>';
+        html += '<div style="font-size:0.8rem; color:#666; margin-bottom:0.4rem;">' + formatDate(dateStr) + (isToday ? ' <strong>(Today)</strong>' : '') + '</div>';
 
         if (daySlots.length > 0) {
-          html += '<div style="font-size:0.85rem; color:#666; margin-bottom:0.5rem;">Available: ';
-          html += daySlots.map(s => s.start + '-' + s.end).join(', ');
+          html += '<div style="font-size:0.75rem; color:#666; margin-bottom:0.3rem;">Available: ';
+          html += daySlots.map(s => formatTimeRange(s.start, s.end)).join(', ');
           html += '</div>';
         } else {
-          html += '<div style="font-size:0.85rem; color:#999;">Not available</div>';
+          html += '<div style="font-size:0.75rem; color:#999;">Not available</div>';
         }
 
-        // Show tasks scheduled for this day
-        const dayTasks = personTasks.filter(t => {
+        // Find tasks scheduled for this specific date
+        const dayTasks = [];
+        personTasks.forEach(t => {
           const schedule = JSON.parse(t.scheduled_json || '[]');
-          return schedule.some(b => {
-            const d = new Date(b.date);
-            return d.getDay() === (dayIdx + 1) % 7 || (dayIdx === 4 && d.getDay() === 5);
-          });
+          const block = schedule.find(b => b.date === dateStr);
+          if (block) {
+            dayTasks.push({ task: t, hours: block.hours });
+          }
         });
 
         if (dayTasks.length > 0) {
-          html += '<div style="margin-top:0.5rem; font-size:0.8rem;"><strong>Assigned tasks:</strong></div>';
-          html += '<ul style="list-style:none; padding:0; margin:0.25rem 0 0 0; font-size:0.8rem;">';
-          dayTasks.forEach(t => {
-            const schedule = JSON.parse(t.scheduled_json || '[]');
-            const dayBlock = schedule.find(b => {
-              const d = new Date(b.date);
-              return d.getDay() === (dayIdx + 1) % 7 || (dayIdx === 4 && d.getDay() === 5);
-            });
-            if (dayBlock) {
-              html += '<li style="padding:0.2rem 0;">• ' + t.title + ' (' + dayBlock.hours + 'h)</li>';
-            }
+          html += '<div style="margin-top:0.4rem; font-size:0.75rem;"><strong>Tasks:</strong></div>';
+          html += '<ul style="list-style:none; padding:0; margin:0.2rem 0 0 0; font-size:0.75rem;">';
+          dayTasks.forEach(item => {
+            const flagColor = item.task.scheduling_flag === 'red' ? '#fee2e2' : (item.task.scheduling_flag === 'orange' ? '#ffedd5' : '');
+            html += '<li style="padding:0.15rem 0;' + (flagColor ? ' background:' + flagColor + '; padding:0.15rem 0.25rem; border-radius:0.25rem;' : '') + '">• ' + item.task.title + ' (' + item.hours + 'h)</li>';
           });
           html += '</ul>';
         }
 
         html += '</div>';
-      }
+      });
+
+      html += '</div>';
+
+      // Week 2 - Next Week
+      html += '<h3 style="margin:1rem 0 0.5rem 0; font-size:1rem; color:#333;">Next Week</h3>';
+      html += '<div class="schedule-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:0.75rem;">';
+
+      week2Dates.forEach((dateStr, idx) => {
+        // Only show Monday-Friday (idx 0-4)
+        if (idx > 4) return;
+
+        const d = new Date(dateStr + 'T12:00:00');
+        const dayIdx = d.getDay();
+        const weekdayIdx = (dayIdx === 0) ? 6 : dayIdx - 1;
+        const daySlots = slots[weekdayIdx.toString()] || [];
+
+        html += '<div class="schedule-day" style="background:#f9fafb; padding:0.75rem; border-radius:0.5rem;">';
+        html += '<h4 style="margin:0 0 0.25rem 0; font-size:0.9rem; color:#2563eb;">' + WEEKDAYS[dayIdx] + '</h4>';
+        html += '<div style="font-size:0.8rem; color:#666; margin-bottom:0.4rem;">' + formatDate(dateStr) + '</div>';
+
+        if (daySlots.length > 0) {
+          html += '<div style="font-size:0.75rem; color:#666; margin-bottom:0.3rem;">Available: ';
+          html += daySlots.map(s => formatTimeRange(s.start, s.end)).join(', ');
+          html += '</div>';
+        } else {
+          html += '<div style="font-size:0.75rem; color:#999;">Not available</div>';
+        }
+
+        // Find tasks scheduled for this specific date
+        const dayTasks = [];
+        personTasks.forEach(t => {
+          const schedule = JSON.parse(t.scheduled_json || '[]');
+          const block = schedule.find(b => b.date === dateStr);
+          if (block) {
+            dayTasks.push({ task: t, hours: block.hours });
+          }
+        });
+
+        if (dayTasks.length > 0) {
+          html += '<div style="margin-top:0.4rem; font-size:0.75rem;"><strong>Tasks:</strong></div>';
+          html += '<ul style="list-style:none; padding:0; margin:0.2rem 0 0 0; font-size:0.75rem;">';
+          dayTasks.forEach(item => {
+            const flagColor = item.task.scheduling_flag === 'red' ? '#fee2e2' : (item.task.scheduling_flag === 'orange' ? '#ffedd5' : '');
+            html += '<li style="padding:0.15rem 0;' + (flagColor ? ' background:' + flagColor + '; padding:0.15rem 0.25rem; border-radius:0.25rem;' : '') + '">• ' + item.task.title + ' (' + item.hours + 'h)</li>';
+          });
+          html += '</ul>';
+        }
+
+        html += '</div>';
+      });
 
       html += '</div>';
       container.innerHTML = html;
