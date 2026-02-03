@@ -25,7 +25,13 @@ import json
 import os
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///taskboard.db')
+
+# Database configuration - supports both SQLite (local) and PostgreSQL (production/Supabase)
+database_url = os.environ.get('DATABASE_URL', 'sqlite:///taskboard.db')
+# Fix for PostgreSQL URL compatibility (some providers use postgres://, SQLAlchemy needs postgresql://)
+if database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Email Configuration
@@ -498,46 +504,107 @@ Taskgrab Notification System
     return send_email(task.assignee.email, subject, body_plain, body_html)
 
 
+def time_str_to_minutes(time_str: str) -> int:
+    """Convert HH:MM time string to minutes since midnight."""
+    try:
+        parts = time_str.split(':')
+        return int(parts[0]) * 60 + int(parts[1])
+    except (ValueError, IndexError):
+        return 0
+
+def get_available_hours_from_slots(time_slots: list, current_time_minutes: int = None) -> float:
+    """Calculate total available hours from time slots, optionally filtering by current time.
+
+    Args:
+        time_slots: List of {"start": "HH:MM", "end": "HH:MM"} dicts
+        current_time_minutes: If provided, only count time remaining after this time (minutes since midnight)
+
+    Returns:
+        Total available hours
+    """
+    total_minutes = 0
+    for slot in time_slots:
+        start_mins = time_str_to_minutes(slot.get('start', '00:00'))
+        end_mins = time_str_to_minutes(slot.get('end', '00:00'))
+
+        if current_time_minutes is not None:
+            # Only count time after current time
+            if end_mins <= current_time_minutes:
+                # Slot has already passed
+                continue
+            if start_mins < current_time_minutes:
+                # Slot started but hasn't ended - count remaining time
+                start_mins = current_time_minutes
+
+        slot_minutes = max(0, end_mins - start_mins)
+        total_minutes += slot_minutes
+
+    return total_minutes / 60.0
+
 def person_remaining_capacity_on_day(person_id: int, day: date, exclude_task_id: int = None) -> float:
-    """Get remaining capacity for a person on a specific day, optionally excluding a task's blocks."""
+    """Get remaining capacity for a person on a specific day, optionally excluding a task's blocks.
+
+    Takes into account the current time if the day is today - only counts hours that haven't passed yet.
+    """
     person = Person.query.get(person_id)
     if not person:
         return 0.0
-    weekly = json.loads(person.weekly_hours or '{}')
-    day_idx = (day.weekday())  # Monday=0
-    day_hours = float(weekly.get(str(day_idx), 0))
-    # sum existing blocks for this person on that day
+
+    day_idx = day.weekday()  # Monday=0
+
+    # Get time slots for this day of the week
+    time_slots_data = json.loads(person.time_slots or '{}')
+    day_slots = time_slots_data.get(str(day_idx), [])
+
+    if not day_slots:
+        return 0.0
+
+    # Check if this is today - if so, only count remaining hours
+    est_now = get_est_now()
+    est_today = est_now.date()
+
+    if day == est_today:
+        # Calculate current time in minutes since midnight
+        current_time_minutes = est_now.hour * 60 + est_now.minute
+        day_hours = get_available_hours_from_slots(day_slots, current_time_minutes)
+    else:
+        day_hours = get_available_hours_from_slots(day_slots)
+
+    if day_hours <= 0:
+        return 0.0
+
+    # Subtract already scheduled blocks for this person on that day
     query = db.session.query(func.coalesce(func.sum(ScheduledBlock.hours), 0.0)).\
         filter(ScheduledBlock.person_id==person_id, ScheduledBlock.day==day)
     if exclude_task_id:
         query = query.filter(ScheduledBlock.task_id != exclude_task_id)
     used = query.scalar() or 0.0
+
     return max(0.0, day_hours - float(used))
 
 
 def person_total_capacity_before_date(person_id: int, before_date: date, start_date: date = None) -> float:
-    """Calculate total available capacity for a person from start_date until before_date (exclusive)."""
-    person = Person.query.get(person_id)
-    if not person:
-        return 0.0
+    """Calculate total available capacity for a person from start_date until before_date (exclusive).
+
+    Uses time-slot-aware capacity calculation that accounts for current time if start_date is today.
+    """
     if start_date is None:
         start_date = get_est_today()
     if before_date <= start_date:
         return 0.0
 
-    weekly = json.loads(person.weekly_hours or '{}')
     total = 0.0
     day_ptr = start_date
     while day_ptr < before_date:
-        day_idx = day_ptr.weekday()
-        day_hours = float(weekly.get(str(day_idx), 0))
-        # Subtract already scheduled blocks
-        used = db.session.query(func.coalesce(func.sum(ScheduledBlock.hours), 0.0)).\
-            filter(ScheduledBlock.person_id==person_id, ScheduledBlock.day==day_ptr).scalar() or 0.0
-        total += max(0.0, day_hours - float(used))
+        # Use the time-aware capacity function
+        total += person_remaining_capacity_on_day(person_id, day_ptr)
         day_ptr += timedelta(days=1)
     return total
 
+
+# Minimum chunk size for scheduling (in hours)
+# Tasks won't be split into chunks smaller than this, except for the final remaining portion
+MIN_SCHEDULE_CHUNK_HOURS = 1.0
 
 def reschedule_all_tasks_for_person(person_id: int):
     """Reschedule all active tasks for a person based on priority and due date.
@@ -576,7 +643,12 @@ def reschedule_all_tasks_for_person(person_id: int):
         while remaining > 0 and safety > 0:
             # Check capacity for this day (excluding current task since we cleared its blocks)
             capacity = person_remaining_capacity_on_day(person_id, day_ptr, exclude_task_id=task.id)
-            if capacity > 0:
+
+            # Enforce minimum chunk size:
+            # - If capacity >= 1 hour, schedule (up to remaining hours)
+            # - If capacity < 1 hour but remaining < 1 hour, schedule (final portion of task)
+            # - If capacity < 1 hour and remaining >= 1 hour, skip this day (don't create tiny chunks)
+            if capacity >= MIN_SCHEDULE_CHUNK_HOURS or (capacity > 0 and remaining < MIN_SCHEDULE_CHUNK_HOURS):
                 chunk = min(capacity, remaining)
                 blk = ScheduledBlock(task_id=task.id, person_id=person_id, day=day_ptr, hours=chunk)
                 db.session.add(blk)
