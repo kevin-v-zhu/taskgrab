@@ -49,6 +49,8 @@ class Person(db.Model):
     email = db.Column(db.String, nullable=True)
     # weekly_hours JSON mapping weekday index 0..6 -> float hours available that day
     weekly_hours = db.Column(db.Text, nullable=False, default='{}')
+    # time_slots JSON mapping weekday index 0..6 -> list of {start: "HH:MM", end: "HH:MM"} slots
+    time_slots = db.Column(db.Text, nullable=False, default='{}')
 
 class Task(db.Model):
     __tablename__ = 'tasks'
@@ -58,10 +60,15 @@ class Task(db.Model):
     description = db.Column(db.Text, nullable=True)
     assignee_id = db.Column(db.Integer, db.ForeignKey('people.id'), nullable=True)
     estimated_hours = db.Column(db.Float, nullable=True, default=0.0)
-    status = db.Column(db.String, nullable=False, default='in_progress')  # in_progress | completed | archived
+    status = db.Column(db.String, nullable=False, default='assigned')  # assigned | in_progress | ready_for_review | complete
     up_for_grabs = db.Column(db.Boolean, nullable=False, default=True)
     # convenience cache of JSON scheduled blocks for quick display (kept in sync with ScheduledBlock rows)
     scheduled_json = db.Column(db.Text, nullable=False, default='[]')
+    # New fields for enhanced task management
+    assigner = db.Column(db.String, nullable=True)  # Name of person who assigned the task
+    priority = db.Column(db.Integer, nullable=False, default=3)  # 1=Highest, 2=High, 3=Medium, 4=Low, 5=Lowest
+    scheduling_flag = db.Column(db.String, nullable=True)  # 'red' (can't complete by due date) or 'orange' (spillover)
+    scheduling_message = db.Column(db.String, nullable=True)  # Warning/info message for scheduling issues
 
     assignee = db.relationship('Person', backref='tasks')
 
@@ -84,7 +91,7 @@ with app.app_context():
     from sqlalchemy import inspect
     inspector = inspect(db.engine)
 
-    # Check if people table exists
+    # Check if people table exists and migrate
     if 'people' in inspector.get_table_names():
         columns = [col['name'] for col in inspector.get_columns('people')]
 
@@ -95,47 +102,125 @@ with app.app_context():
                 conn.commit()
             app.logger.info("Migration complete: email column added")
 
+        if 'time_slots' not in columns:
+            app.logger.info("Running migration: adding time_slots column to people table")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE people ADD COLUMN time_slots TEXT DEFAULT '{}'"))
+                conn.commit()
+            app.logger.info("Migration complete: time_slots column added")
+
+    # Check if tasks table exists and migrate
+    if 'tasks' in inspector.get_table_names():
+        task_columns = [col['name'] for col in inspector.get_columns('tasks')]
+
+        if 'assigner' not in task_columns:
+            app.logger.info("Running migration: adding assigner column to tasks table")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE tasks ADD COLUMN assigner VARCHAR"))
+                conn.commit()
+            app.logger.info("Migration complete: assigner column added")
+
+        if 'priority' not in task_columns:
+            app.logger.info("Running migration: adding priority column to tasks table")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 3"))
+                conn.commit()
+            app.logger.info("Migration complete: priority column added")
+
+        if 'scheduling_flag' not in task_columns:
+            app.logger.info("Running migration: adding scheduling_flag column to tasks table")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE tasks ADD COLUMN scheduling_flag VARCHAR"))
+                conn.commit()
+            app.logger.info("Migration complete: scheduling_flag column added")
+
+        if 'scheduling_message' not in task_columns:
+            app.logger.info("Running migration: adding scheduling_message column to tasks table")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE tasks ADD COLUMN scheduling_message VARCHAR"))
+                conn.commit()
+            app.logger.info("Migration complete: scheduling_message column added")
+
     db.create_all()
     if Person.query.count() == 0:
         # Define team members with their schedules and emails
 
         # Day 0 = Monday
 
+        # Real schedule data with specific time slots
+        # Day indices: 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
         team_members = [
             {
                 "name": "Vidya",
                 "email": "vidya22@sas.upenn.edu",
-                "schedule": {"0": 4, "1": 0, "2": 3, "3": 0, "4": 4, "5": 0, "6": 0}
+                "schedule": {"0": 0, "1": 3, "2": 0, "3": 0, "4": 3, "5": 0, "6": 0},
+                "time_slots": {
+                    "1": [{"start": "12:00", "end": "15:00"}],  # Tuesday 12-3pm
+                    "4": [{"start": "11:00", "end": "14:00"}]   # Friday 11am-2pm
+                }
             },
             {
                 "name": "Ariel",
                 "email": "fariel@sas.upenn.edu",
-                "schedule": {"0": 3, "1": 3, "2": 3, "3": 0, "4": 0, "5": 0, "6": 0}
+                "schedule": {"0": 4, "1": 0, "2": 0, "3": 0, "4": 3, "5": 0, "6": 0},
+                "time_slots": {
+                    "0": [{"start": "13:00", "end": "17:00"}],  # Monday 1-5pm
+                    "4": [{"start": "14:00", "end": "17:00"}]   # Friday 2-5pm
+                }
             },
             {
                 "name": "Ray",
                 "email": "ruitian@wharton.upenn.edu",
-                "schedule": {"0": 0, "1": 2, "2": 0, "3": 0, "4": 4, "5": 0, "6": 0}
+                "schedule": {"0": 0, "1": 0, "2": 1.75, "3": 0, "4": 4, "5": 0, "6": 0},
+                "time_slots": {
+                    "2": [{"start": "15:15", "end": "17:00"}],  # Wednesday 3:15-5pm
+                    "4": [{"start": "10:00", "end": "14:00"}]   # Friday 10am-2pm
+                }
             },
             {
                 "name": "Viveka",
                 "email": "vsinha@wharton.upenn.edu",
-                "schedule": {"0": 0, "1": 2.5, "2": 0, "3": 3, "4": 3, "5": 0, "6": 0}
+                "schedule": {"0": 2, "1": 0, "2": 2, "3": 2, "4": 4, "5": 0, "6": 0},
+                "time_slots": {
+                    "0": [{"start": "13:30", "end": "15:30"}],  # Monday 1:30-3:30pm
+                    "2": [{"start": "13:30", "end": "15:30"}],  # Wednesday 1:30-3:30pm
+                    "3": [{"start": "11:45", "end": "13:45"}],  # Thursday 11:45am-1:45pm
+                    "4": [{"start": "13:00", "end": "17:00"}]   # Friday 1-5pm
+                }
             },
             {
                 "name": "Melinda",
                 "email": "melimei@wharton.upenn.edu",
-                "schedule": {"0": 0, "1": 1.5, "2": 1, "3": 1.5, "4": 6, "5": 0, "6": 0}
+                "schedule": {"0": 0, "1": 3, "2": 0, "3": 5, "4": 2, "5": 0, "6": 0},
+                "time_slots": {
+                    "1": [{"start": "12:00", "end": "15:00"}],  # Tuesday 12-3pm
+                    "3": [{"start": "10:00", "end": "15:00"}],  # Thursday 10am-3pm
+                    "4": [{"start": "15:00", "end": "17:00"}]   # Friday 3-5pm
+                }
             },
             {
-                "name": "Lila",
+                "name": "Test Lila",
                 "email": "ldimasi@wharton.upenn.edu",
-                "schedule": {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "6": 0}
+                "schedule": {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1, "5": 0, "6": 0},
+                "time_slots": {
+                    "0": [{"start": "16:00", "end": "17:00"}],  # Monday 4-5pm
+                    "1": [{"start": "16:00", "end": "17:00"}],  # Tuesday 4-5pm
+                    "2": [{"start": "16:00", "end": "17:00"}],  # Wednesday 4-5pm
+                    "3": [{"start": "16:00", "end": "17:00"}],  # Thursday 4-5pm
+                    "4": [{"start": "16:00", "end": "17:00"}]   # Friday 4-5pm
+                }
             },
             {
-                "name": "Kevin",
+                "name": "Test Kevin",
                 "email": "kvzhu@wharton.upenn.edu",
-                "schedule": {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "6": 0}
+                "schedule": {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1, "5": 0, "6": 0},
+                "time_slots": {
+                    "0": [{"start": "16:00", "end": "17:00"}],  # Monday 4-5pm
+                    "1": [{"start": "16:00", "end": "17:00"}],  # Tuesday 4-5pm
+                    "2": [{"start": "16:00", "end": "17:00"}],  # Wednesday 4-5pm
+                    "3": [{"start": "16:00", "end": "17:00"}],  # Thursday 4-5pm
+                    "4": [{"start": "16:00", "end": "17:00"}]   # Friday 4-5pm
+                }
             }
         ]
 
@@ -143,7 +228,8 @@ with app.app_context():
             db.session.add(Person(
                 name=member["name"],
                 email=member["email"],
-                weekly_hours=json.dumps(member["schedule"])
+                weekly_hours=json.dumps(member["schedule"]),
+                time_slots=json.dumps(member.get("time_slots", {}))
             ))
         db.session.commit()
 
@@ -370,7 +456,8 @@ Taskgrab Notification System
     return send_email(task.assignee.email, subject, body_plain, body_html)
 
 
-def person_remaining_capacity_on_day(person_id: int, day: date) -> float:
+def person_remaining_capacity_on_day(person_id: int, day: date, exclude_task_id: int = None) -> float:
+    """Get remaining capacity for a person on a specific day, optionally excluding a task's blocks."""
     person = Person.query.get(person_id)
     if not person:
         return 0.0
@@ -378,42 +465,171 @@ def person_remaining_capacity_on_day(person_id: int, day: date) -> float:
     day_idx = (day.weekday())  # Monday=0
     day_hours = float(weekly.get(str(day_idx), 0))
     # sum existing blocks for this person on that day
-    used = db.session.query(func.coalesce(func.sum(ScheduledBlock.hours), 0.0)).\
-        filter(ScheduledBlock.person_id==person_id, ScheduledBlock.day==day).scalar() or 0.0
+    query = db.session.query(func.coalesce(func.sum(ScheduledBlock.hours), 0.0)).\
+        filter(ScheduledBlock.person_id==person_id, ScheduledBlock.day==day)
+    if exclude_task_id:
+        query = query.filter(ScheduledBlock.task_id != exclude_task_id)
+    used = query.scalar() or 0.0
     return max(0.0, day_hours - float(used))
+
+
+def person_total_capacity_before_date(person_id: int, before_date: date, start_date: date = None) -> float:
+    """Calculate total available capacity for a person from start_date until before_date (exclusive)."""
+    person = Person.query.get(person_id)
+    if not person:
+        return 0.0
+    if start_date is None:
+        start_date = date.today()
+    if before_date <= start_date:
+        return 0.0
+
+    weekly = json.loads(person.weekly_hours or '{}')
+    total = 0.0
+    day_ptr = start_date
+    while day_ptr < before_date:
+        day_idx = day_ptr.weekday()
+        day_hours = float(weekly.get(str(day_idx), 0))
+        # Subtract already scheduled blocks
+        used = db.session.query(func.coalesce(func.sum(ScheduledBlock.hours), 0.0)).\
+            filter(ScheduledBlock.person_id==person_id, ScheduledBlock.day==day_ptr).scalar() or 0.0
+        total += max(0.0, day_hours - float(used))
+        day_ptr += timedelta(days=1)
+    return total
+
+
+def reschedule_all_tasks_for_person(person_id: int):
+    """Reschedule all active tasks for a person based on priority and due date.
+    This ensures higher priority tasks get scheduled first.
+    """
+    # Get all active tasks for this person, ordered by priority then due date
+    tasks = Task.query.filter(
+        Task.assignee_id == person_id,
+        Task.status.notin_(['complete', 'completed', 'archived'])
+    ).order_by(
+        Task.priority.asc().nullslast(),
+        Task.due_date.asc().nullslast()
+    ).all()
+
+    # Clear all existing blocks for this person's tasks
+    for task in tasks:
+        ScheduledBlock.query.filter_by(task_id=task.id).delete()
+        task.scheduling_flag = None
+        task.scheduling_message = None
+
+    today = date.today()
+
+    # Schedule each task in priority order
+    for task in tasks:
+        if not task.estimated_hours or task.estimated_hours <= 0:
+            task.scheduled_json = '[]'
+            continue
+
+        remaining = float(task.estimated_hours)
+        day_ptr = today
+        blocks = []
+        safety = 365
+        passed_due_date = False
+        hours_scheduled_before_due = 0.0
+
+        while remaining > 0 and safety > 0:
+            # Check capacity for this day (excluding current task since we cleared its blocks)
+            capacity = person_remaining_capacity_on_day(person_id, day_ptr, exclude_task_id=task.id)
+            if capacity > 0:
+                chunk = min(capacity, remaining)
+                blk = ScheduledBlock(task_id=task.id, person_id=person_id, day=day_ptr, hours=chunk)
+                db.session.add(blk)
+                blocks.append({"date": day_ptr.isoformat(), "hours": round(chunk, 2)})
+
+                # Track hours scheduled before due date
+                if task.due_date and day_ptr <= task.due_date:
+                    hours_scheduled_before_due += chunk
+
+                remaining -= chunk
+
+            # Check if we've passed the due date
+            if task.due_date and day_ptr > task.due_date and not passed_due_date:
+                passed_due_date = True
+
+            day_ptr += timedelta(days=1)
+            safety -= 1
+
+        task.scheduled_json = json.dumps(blocks)
+
+        # Set flags based on scheduling result
+        if task.due_date:
+            if remaining > 0:
+                # Couldn't complete task at all - RED flag
+                task.scheduling_flag = 'red'
+                task.scheduling_message = f"Cannot complete by due date. {remaining:.1f}h remaining. Please re-assign."
+            elif passed_due_date:
+                # Task spills over past due date - ORANGE flag
+                spillover_hours = task.estimated_hours - hours_scheduled_before_due
+                task.scheduling_flag = 'orange'
+                task.scheduling_message = f"Re-assign remaining {spillover_hours:.1f} hours if not completed by due date."
+            else:
+                # Task can be completed on time
+                task.scheduling_flag = None
+                task.scheduling_message = None
+
+    db.session.commit()
 
 
 def auto_schedule_task(task: Task):
     """Fill ScheduledBlock rows for task based on assignee weekly_hours and estimated_hours.
-    Overwrites any existing schedule for the task. Minimal, forward-fill algorithm.
+    Triggers a full reschedule for the assignee to respect priority ordering.
     """
-    # Clear existing blocks
-    ScheduledBlock.query.filter_by(task_id=task.id).delete()
-
-    if not task.assignee_id or not task.estimated_hours or task.estimated_hours <= 0:
+    if not task.assignee_id:
+        ScheduledBlock.query.filter_by(task_id=task.id).delete()
         task.scheduled_json = '[]'
+        task.scheduling_flag = None
+        task.scheduling_message = None
         db.session.commit()
         return
 
-    remaining = float(task.estimated_hours)
+    # Reschedule all tasks for this person to respect priority order
+    reschedule_all_tasks_for_person(task.assignee_id)
+
+
+def find_best_assignee(estimated_hours: float, due_date: date = None) -> int | None:
+    """Find the best available RA to assign a task to.
+    Returns the person_id of the RA with the most available capacity who can complete the task.
+    If no one can complete the task entirely, returns the person who can do the most.
+    """
+    if not estimated_hours or estimated_hours <= 0:
+        return None
+
+    people = Person.query.all()
+    if not people:
+        return None
+
     today = date.today()
-    day_ptr = today
-    blocks = []
-    safety = 365  # prevent infinite loop
+    best_person_id = None
+    best_capacity = 0.0
+    best_can_complete = False
 
-    while remaining > 0 and safety > 0:
-        capacity = person_remaining_capacity_on_day(task.assignee_id, day_ptr)
-        if capacity > 0:
-            chunk = min(capacity, remaining)
-            blk = ScheduledBlock(task_id=task.id, person_id=task.assignee_id, day=day_ptr, hours=chunk)
-            db.session.add(blk)
-            blocks.append({"date": day_ptr.isoformat(), "hours": round(chunk,2)})
-            remaining -= chunk
-        day_ptr += timedelta(days=1)
-        safety -= 1
+    for person in people:
+        # Calculate capacity before due date (or total capacity if no due date)
+        if due_date:
+            capacity = person_total_capacity_before_date(person.id, due_date, today)
+            can_complete = capacity >= estimated_hours
+        else:
+            # No due date - calculate capacity for next 30 days
+            future_date = today + timedelta(days=30)
+            capacity = person_total_capacity_before_date(person.id, future_date, today)
+            can_complete = capacity >= estimated_hours
 
-    task.scheduled_json = json.dumps(blocks)
-    db.session.commit()
+        # Prefer someone who can complete the task
+        if can_complete and not best_can_complete:
+            best_person_id = person.id
+            best_capacity = capacity
+            best_can_complete = True
+        elif can_complete == best_can_complete:
+            # If both can or both can't complete, prefer the one with more capacity
+            if capacity > best_capacity:
+                best_person_id = person.id
+                best_capacity = capacity
+
+    return best_person_id
 
 
 def task_css(task: Task) -> str:
@@ -422,9 +638,14 @@ def task_css(task: Task) -> str:
     if task.up_for_grabs:
         classes.append("up-for-grabs")
     # overdue
-    if task.due_date and task.status != 'completed' and date.today() > task.due_date:
+    if task.due_date and task.status not in ('complete', 'completed') and date.today() > task.due_date:
         classes.append("overdue")
-    # in progress default look handled by CSS .task-card
+    # status class
+    status = task.status or 'assigned'
+    classes.append(f"status-{status.replace('_', '-')}")
+    # scheduling flag class
+    if task.scheduling_flag:
+        classes.append(f"flag-{task.scheduling_flag}")
     return ' '.join(classes)
 
 # -----------------------------
@@ -434,11 +655,30 @@ def task_css(task: Task) -> str:
 def index():
     tasks = Task.query.filter(Task.status != 'archived').order_by(Task.id.desc()).all()
     people = Person.query.order_by(Person.name).all()
-    return render_template_string(INDEX_HTML, tasks=tasks, people=people, task_css=task_css, WEEKDAY_LABELS=WEEKDAY_LABELS, json=json, today=date.today())
+
+    # Prepare JSON for JavaScript
+    people_json = json.dumps([{
+        'id': p.id,
+        'name': p.name,
+        'time_slots': json.loads(p.time_slots or '{}')
+    } for p in people])
+
+    tasks_json = json.dumps([{
+        'id': t.id,
+        'title': t.title,
+        'assignee_id': t.assignee_id,
+        'status': t.status,
+        'scheduled_json': t.scheduled_json
+    } for t in tasks])
+
+    return render_template_string(INDEX_HTML, tasks=tasks, people=people, task_css=task_css,
+                                  WEEKDAY_LABELS=WEEKDAY_LABELS, json=json, today=date.today(),
+                                  people_json=people_json, tasks_json=tasks_json)
 
 @app.route('/archive')
 def archive():
-    tasks = Task.query.filter(Task.status=='completed').order_by(Task.id.desc()).all()
+    # Show tasks with status 'complete' (new) or 'completed' (legacy) for backward compatibility
+    tasks = Task.query.filter(Task.status.in_(['complete', 'completed'])).order_by(Task.id.desc()).all()
     return render_template_string(ARCHIVE_HTML, tasks=tasks, task_css=task_css)
 
 @app.route('/task/<int:task_id>')
@@ -460,11 +700,20 @@ def api_create_task():
     due_date = parse_date(data.get('due_date'))
     description = data.get('description') or ''
     estimated_hours = float(data.get('estimated_hours') or 0)
+    priority = int(data.get('priority') or 3)
+    assigner = (data.get('assigner') or '').strip() or None
 
     assignee_raw = data.get('assignee_id')
     up_for_grabs = True
     assignee_id = None
-    if assignee_raw and str(assignee_raw) != '-1':
+    auto_assign_requested = str(assignee_raw) == '-2'
+
+    if auto_assign_requested:
+        # Auto-assign to best available RA
+        assignee_id = find_best_assignee(estimated_hours, due_date)
+        if assignee_id:
+            up_for_grabs = False
+    elif assignee_raw and str(assignee_raw) != '-1':
         person = Person.query.get(int(assignee_raw))
         if person:
             assignee_id = person.id
@@ -477,12 +726,16 @@ def api_create_task():
         assignee_id=assignee_id,
         estimated_hours=estimated_hours,
         up_for_grabs=up_for_grabs,
-        status='in_progress'
+        status='assigned' if assignee_id else 'assigned',
+        priority=priority,
+        assigner=assigner
     )
     db.session.add(task)
     db.session.commit()
 
+    # Auto-schedule if assigned
     if assignee_id:
+        auto_schedule_task(task)
         # Send assignment email
         person = Person.query.get(assignee_id)
         if person:
@@ -507,12 +760,37 @@ def api_update_task(task_id: int):
         except ValueError:
             task.estimated_hours = 0
 
+    # Handle new fields
+    if 'status' in data:
+        task.status = data.get('status') or 'assigned'
+    if 'priority' in data:
+        try:
+            task.priority = int(data.get('priority') or 3)
+        except ValueError:
+            task.priority = 3
+    if 'assigner' in data:
+        task.assigner = (data.get('assigner') or '').strip() or None
+
+    old_assignee_id = task.assignee_id
+    old_assignee = Person.query.get(old_assignee_id) if old_assignee_id else None
+    new_assignee = None
+    assignee_changed = False
+
     if 'assignee_id' in data:
         raw = data.get('assignee_id')
-        old_assignee_id = task.assignee_id
-        old_assignee = Person.query.get(old_assignee_id) if old_assignee_id else None
+        auto_assign_requested = str(raw) == '-2'
 
-        if raw and str(raw) != '-1':
+        if auto_assign_requested:
+            # Auto-assign to best available RA
+            new_id = find_best_assignee(task.estimated_hours, task.due_date)
+            if new_id:
+                task.assignee_id = new_id
+                task.up_for_grabs = False
+                new_assignee = Person.query.get(new_id)
+            else:
+                task.assignee_id = None
+                task.up_for_grabs = True
+        elif raw and str(raw) != '-1':
             person = Person.query.get(int(raw))
             if person:
                 task.assignee_id = person.id
@@ -521,15 +799,16 @@ def api_update_task(task_id: int):
         else:
             task.assignee_id = None
             task.up_for_grabs = True
-            new_assignee = None
 
         assignee_changed = old_assignee_id != task.assignee_id
-    else:
-        assignee_changed = False
-        old_assignee = None
-        new_assignee = None
 
     db.session.commit()
+
+    # Auto-schedule if reschedule checkbox is checked or assignee changed
+    reschedule = data.get('reschedule') == '1' or data.get('reschedule') == 'true'
+    if reschedule or assignee_changed:
+        if task.assignee_id:
+            auto_schedule_task(task)
 
     # Send email notifications for assignee changes
     if assignee_changed:
@@ -543,12 +822,18 @@ def api_update_task(task_id: int):
             # Newly assigned (was up for grabs, now has assignee)
             send_task_assigned_email(task, new_assignee)
 
+    # If status changed to complete, redirect to archive
+    if task.status == 'complete':
+        return redirect(url_for('archive'))
+
     return redirect(url_for('task_detail', task_id=task.id))
 
 @app.post('/api/tasks/<int:task_id>/complete')
 def api_complete_task(task_id: int):
     task = Task.query.get_or_404(task_id)
-    task.status = 'completed'
+    task.status = 'complete'
+    task.scheduling_flag = None
+    task.scheduling_message = None
     db.session.commit()
     # Send completion email
     send_task_completed_email(task)
@@ -561,6 +846,40 @@ def api_delete_task(task_id: int):
     db.session.delete(task)
     db.session.commit()
     return redirect(url_for('index'))
+
+@app.get('/api/people/<int:person_id>/schedule')
+def api_person_schedule(person_id: int):
+    """Get a person's availability and assigned tasks as JSON."""
+    person = Person.query.get_or_404(person_id)
+    time_slots = json.loads(person.time_slots or '{}')
+    weekly_hours = json.loads(person.weekly_hours or '{}')
+
+    # Get all active tasks for this person
+    tasks = Task.query.filter(
+        Task.assignee_id == person_id,
+        Task.status.notin_(['complete', 'completed', 'archived'])
+    ).order_by(Task.priority.asc().nullslast(), Task.due_date.asc().nullslast()).all()
+
+    tasks_data = [{
+        'id': t.id,
+        'title': t.title,
+        'due_date': t.due_date.isoformat() if t.due_date else None,
+        'estimated_hours': t.estimated_hours,
+        'priority': t.priority,
+        'status': t.status,
+        'scheduled_json': json.loads(t.scheduled_json or '[]'),
+        'scheduling_flag': t.scheduling_flag,
+        'scheduling_message': t.scheduling_message
+    } for t in tasks]
+
+    return jsonify({
+        'id': person.id,
+        'name': person.name,
+        'email': person.email,
+        'time_slots': time_slots,
+        'weekly_hours': weekly_hours,
+        'tasks': tasks_data
+    })
 
 @app.post('/api/task/<int:task_id>/blocks')
 def api_update_blocks(task_id: int):
@@ -606,9 +925,26 @@ button.link{ background:transparent; color:var(--accent); padding:0; }
 input, select, textarea{ width:100%; padding:.5rem .6rem; border:1px solid var(--border); border-radius:.5rem; background:#fff; color:#111; }
 label{ font-size:.85rem; color:var(--muted);} 
 .grid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:1rem; margin-top:1rem;}
-.task-card{ background:var(--card); border:1px solid var(--border); border-radius:.75rem; padding:0.75rem; box-shadow: 0 1px 0 rgba(0,0,0,.03);} 
+.task-card{ background:var(--card); border:1px solid var(--border); border-radius:.75rem; padding:0.75rem; box-shadow: 0 1px 0 rgba(0,0,0,.03);}
 .task-card.overdue{ border-color: #fca5a5; box-shadow: 0 0 0 2px #fee2e2 inset; }
 .task-card.up-for-grabs{ background: #fff7cc; }
+/* Status colors */
+.task-card.status-assigned{ border-left: 4px solid #3b82f6; }
+.task-card.status-in-progress{ border-left: 4px solid #f59e0b; }
+.task-card.status-ready-for-review{ border-left: 4px solid #8b5cf6; }
+.task-card.status-complete{ border-left: 4px solid #10b981; }
+/* Scheduling flags */
+.task-card.flag-red{ background-color: #fee2e2; }
+.task-card.flag-orange{ background-color: #ffedd5; }
+.scheduling-message{ font-size:.75rem; color:#dc2626; font-weight:600; margin-top:.25rem; }
+.scheduling-message.orange{ color:#ea580c; }
+/* Priority badges */
+.priority-badge{ display:inline-block; padding:.1rem .4rem; border-radius:.4rem; font-size:.7rem; font-weight:600; margin-left:.25rem; }
+.priority-1{ background:#fee2e2; color:#dc2626; }
+.priority-2{ background:#ffedd5; color:#ea580c; }
+.priority-3{ background:#fef3c7; color:#d97706; }
+.priority-4{ background:#dbeafe; color:#2563eb; }
+.priority-5{ background:#e0e7ff; color:#4f46e5; }
 .task-head{ display:flex; justify-content:space-between; align-items:center; gap:.5rem;}
 .task-title{ font-weight:700; font-size:1rem;}
 .task-meta{ font-size:.8rem; color:var(--muted); margin-top:.25rem;}
@@ -635,7 +971,7 @@ INDEX_HTML = """
   <h1>Taskboard</h1>
   <div class="controls">
     <button onclick="document.getElementById('newTask').toggleAttribute('hidden')">＋ New Task</button>
-    <a class="btn" href="{{ url_for('archive') }}">Archive</a>
+    <a class="btn" href="{{ url_for('archive') }}">Completed Tasks</a>
   </div>
 </header>
 <div class="container">
@@ -653,12 +989,27 @@ INDEX_HTML = """
         <label>Assignee</label>
         <select name="assignee_id">
           <option value="-1">Up for grabs</option>
+          <option value="-2">Auto-assign</option>
           {% for p in people %}<option value="{{p.id}}">{{p.name}}</option>{% endfor %}
         </select>
       </div>
       <div>
         <label>Estimated hours</label>
         <input name="estimated_hours" type="number" min="0" step="0.25" placeholder="e.g., 6">
+      </div>
+      <div>
+        <label>Priority</label>
+        <select name="priority">
+          <option value="1">1 - Highest</option>
+          <option value="2">2 - High</option>
+          <option value="3" selected>3 - Medium</option>
+          <option value="4">4 - Low</option>
+          <option value="5">5 - Lowest</option>
+        </select>
+      </div>
+      <div>
+        <label>Assigned by</label>
+        <input name="assigner" placeholder="Your name">
       </div>
       <div style="grid-column:1/-1">
         <label>Description</label>
@@ -672,17 +1023,25 @@ INDEX_HTML = """
   </form>
 
   <div class="grid">
-    {% for t in tasks if t.status != 'completed' %}
+    {% for t in tasks if t.status != 'complete' %}
     <div class="{{ task_css(t) }}">
       <div class="task-head">
-        <div class="task-title">{{ t.title }}</div>
+        <div class="task-title">
+          {{ t.title }}
+          <span class="priority-badge priority-{{ t.priority or 3 }}">P{{ t.priority or 3 }}</span>
+        </div>
         <a class="badge" href="{{ url_for('task_detail', task_id=t.id) }}">Open</a>
       </div>
       <div class="task-meta">
         {% if t.due_date %}Due: {{ t.due_date.strftime('%b %d, %Y') }}{% else %}No due date{% endif %} ·
         {% if t.up_for_grabs %}<strong>Up for grabs</strong>{% else %}Assignee: {{ t.assignee.name }}{% endif %}
         {% if t.estimated_hours %} · Est: {{ '%.2f'|format(t.estimated_hours) }}h{% endif %}
+        {% if t.assigner %} · By: {{ t.assigner }}{% endif %}
       </div>
+      <div class="task-meta">Status: {{ t.status|replace('_', ' ')|title }}</div>
+      {% if t.scheduling_message %}
+      <div class="scheduling-message {{ 'orange' if t.scheduling_flag == 'orange' else '' }}">⚠️ {{ t.scheduling_message }}</div>
+      {% endif %}
       {% if t.description %}<div style="margin-top:.4rem;">{{ t.description }}</div>{% endif %}
       <form method="post" action="{{ url_for('api_complete_task', task_id=t.id) }}" style="margin-top:.6rem; display:flex; gap:.5rem;">
         <button>Mark complete</button>
@@ -698,45 +1057,102 @@ INDEX_HTML = """
 
   <h2>Weekly Schedule</h2>
   <div class="schedule-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:1rem; margin-top:1rem;">
+    {% for day_idx in range(5) %}
     <div class="schedule-day">
-      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Monday</h3>
+      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">{{ WEEKDAY_LABELS[day_idx] }}</h3>
       <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
-        <li>Ariel: 1-5</li>
-        <li>Viveka: 1:30-3:30</li>
+        {% for p in people %}
+          {% set slots = json.loads(p.time_slots or '{}').get(day_idx|string, []) %}
+          {% for slot in slots %}
+            <li>{{ p.name }}: {{ slot.start }}-{{ slot.end }}</li>
+          {% endfor %}
+        {% endfor %}
       </ul>
     </div>
-    <div class="schedule-day">
-      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Tuesday</h3>
-      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
-        <li>Melinda: 12-3</li>
-        <li>Vidya: 12-3</li>
-      </ul>
-    </div>
-    <div class="schedule-day">
-      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Wednesday</h3>
-      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
-        <li>Viveka: 1:30-3:30</li>
-        <li>Ray: 3:15-5:00</li>
-      </ul>
-    </div>
-    <div class="schedule-day">
-      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Thursday</h3>
-      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
-        <li>Melinda: 10-3</li>
-        <li>Viveka: 11:45-1:45</li>
-      </ul>
-    </div>
-    <div class="schedule-day">
-      <h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">Friday</h3>
-      <ul style="list-style:none; padding:0; margin:0; font-size:0.9rem;">
-        <li>Ray: 10-2</li>
-        <li>Vidya: 11-2</li>
-        <li>Melinda: 3-5</li>
-        <li>Viveka: 1-5</li>
-        <li>Ariel: 2-5</li>
-      </ul>
-    </div>
+    {% endfor %}
   </div>
+
+  <hr style="margin-top:2rem;">
+
+  <h2>Individual RA Schedule</h2>
+  <div style="margin-top:1rem;">
+    <select id="ra-selector" onchange="showRASchedule(this.value)" style="margin-bottom:1rem;">
+      <option value="">Select an RA to view their schedule...</option>
+      {% for p in people %}
+      <option value="{{ p.id }}">{{ p.name }}</option>
+      {% endfor %}
+    </select>
+    <div id="ra-schedule-view"></div>
+  </div>
+
+  <script>
+    const peopleData = {{ people_json|safe }};
+    const tasksData = {{ tasks_json|safe }};
+    const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+
+    function showRASchedule(personId) {
+      const container = document.getElementById('ra-schedule-view');
+      if (!personId) {
+        container.innerHTML = '';
+        return;
+      }
+
+      const person = peopleData.find(p => p.id == personId);
+      if (!person) {
+        container.innerHTML = '<p>Person not found</p>';
+        return;
+      }
+
+      const slots = person.time_slots || {};
+      const personTasks = tasksData.filter(t => t.assignee_id == personId && t.status !== 'complete' && t.status !== 'completed');
+
+      let html = '<div class="schedule-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:1rem;">';
+
+      for (let dayIdx = 0; dayIdx < 5; dayIdx++) {
+        const daySlots = slots[dayIdx.toString()] || [];
+        html += '<div class="schedule-day" style="background:#f9fafb; padding:0.75rem; border-radius:0.5rem;">';
+        html += '<h3 style="margin:0 0 0.5rem 0; font-size:1rem; color:#2563eb;">' + WEEKDAYS[dayIdx] + '</h3>';
+
+        if (daySlots.length > 0) {
+          html += '<div style="font-size:0.85rem; color:#666; margin-bottom:0.5rem;">Available: ';
+          html += daySlots.map(s => s.start + '-' + s.end).join(', ');
+          html += '</div>';
+        } else {
+          html += '<div style="font-size:0.85rem; color:#999;">Not available</div>';
+        }
+
+        // Show tasks scheduled for this day
+        const dayTasks = personTasks.filter(t => {
+          const schedule = JSON.parse(t.scheduled_json || '[]');
+          return schedule.some(b => {
+            const d = new Date(b.date);
+            return d.getDay() === (dayIdx + 1) % 7 || (dayIdx === 4 && d.getDay() === 5);
+          });
+        });
+
+        if (dayTasks.length > 0) {
+          html += '<div style="margin-top:0.5rem; font-size:0.8rem;"><strong>Assigned tasks:</strong></div>';
+          html += '<ul style="list-style:none; padding:0; margin:0.25rem 0 0 0; font-size:0.8rem;">';
+          dayTasks.forEach(t => {
+            const schedule = JSON.parse(t.scheduled_json || '[]');
+            const dayBlock = schedule.find(b => {
+              const d = new Date(b.date);
+              return d.getDay() === (dayIdx + 1) % 7 || (dayIdx === 4 && d.getDay() === 5);
+            });
+            if (dayBlock) {
+              html += '<li style="padding:0.2rem 0;">• ' + t.title + ' (' + dayBlock.hours + 'h)</li>';
+            }
+          });
+          html += '</ul>';
+        }
+
+        html += '</div>';
+      }
+
+      html += '</div>';
+      container.innerHTML = html;
+    }
+  </script>
 </div>
 </body>
 </html>
@@ -748,12 +1164,12 @@ ARCHIVE_HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Archive</title>
+  <title>Completed Tasks</title>
   <style>{{ BASE_CSS }}</style>
 </head>
 <body>
 <header>
-  <h1>Archive</h1>
+  <h1>Completed Tasks</h1>
   <div class="controls">
     <a class="btn" href="{{ url_for('index') }}">← Back to board</a>
   </div>
@@ -761,11 +1177,12 @@ ARCHIVE_HTML = """
 <div class="container">
   <div class="grid">
     {% for t in tasks %}
-    <div class="task-card">
+    <div class="task-card status-complete">
       <div class="task-head">
         <div class="task-title">{{ t.title }}</div>
       </div>
       <div class="task-meta">Completed · {% if t.due_date %}Due was {{ t.due_date.strftime('%b %d, %Y') }}{% else %}No due date{% endif %}</div>
+      {% if t.assigner %}<div class="task-meta">Assigned by: {{ t.assigner }}</div>{% endif %}
       {% if t.description %}<div style="margin-top:.4rem;">{{ t.description }}</div>{% endif %}
     </div>
     {% else %}
@@ -794,6 +1211,12 @@ TASK_HTML = """
   </div>
 </header>
 <div class="container">
+  {% if task.scheduling_message %}
+  <div class="scheduling-message {{ 'orange' if task.scheduling_flag == 'orange' else '' }}" style="padding:0.75rem; margin-bottom:1rem; border-radius:0.5rem; background:{{ '#ffedd5' if task.scheduling_flag == 'orange' else '#fee2e2' }};">
+    ⚠️ {{ task.scheduling_message }}
+  </div>
+  {% endif %}
+
   <form method="post" action="{{ url_for('api_update_task', task_id=task.id) }}">
     <div class="form-grid">
       <div>
@@ -808,21 +1231,45 @@ TASK_HTML = """
         <label>Assignee</label>
         <select name="assignee_id">
           <option value="-1" {% if task.up_for_grabs %}selected{% endif %}>Up for grabs</option>
+          <option value="-2">Auto-assign</option>
           {% for p in people %}<option value="{{p.id}}" {% if task.assignee_id==p.id %}selected{% endif %}>{{p.name}}</option>{% endfor %}
         </select>
-        <div class="small">Change assignee and tick “Reschedule” to auto-fill based on working hours.</div>
+        <div class="small">Change assignee and tick "Reschedule" to auto-fill based on working hours.</div>
       </div>
       <div>
         <label>Estimated hours</label>
         <input name="estimated_hours" type="number" min="0" step="0.25" value="{{ '%.2f'|format(task.estimated_hours or 0) }}">
       </div>
-      <div style="grid-column:1/-1">
-        <label>Description</label>
-        <textarea name="description" rows="3">{{ task.description or '' }}</textarea>
+      <div>
+        <label>Status</label>
+        <select name="status">
+          <option value="assigned" {% if task.status == 'assigned' %}selected{% endif %}>Assigned</option>
+          <option value="in_progress" {% if task.status == 'in_progress' %}selected{% endif %}>In Progress</option>
+          <option value="ready_for_review" {% if task.status == 'ready_for_review' %}selected{% endif %}>Ready for Review</option>
+          <option value="complete" {% if task.status in ['complete', 'completed'] %}selected{% endif %}>Complete</option>
+        </select>
+      </div>
+      <div>
+        <label>Priority</label>
+        <select name="priority">
+          <option value="1" {% if task.priority == 1 %}selected{% endif %}>1 - Highest</option>
+          <option value="2" {% if task.priority == 2 %}selected{% endif %}>2 - High</option>
+          <option value="3" {% if (task.priority or 3) == 3 %}selected{% endif %}>3 - Medium</option>
+          <option value="4" {% if task.priority == 4 %}selected{% endif %}>4 - Low</option>
+          <option value="5" {% if task.priority == 5 %}selected{% endif %}>5 - Lowest</option>
+        </select>
+      </div>
+      <div>
+        <label>Assigned by</label>
+        <input name="assigner" value="{{ task.assigner or '' }}" placeholder="Name of assigner">
       </div>
       <div style="display:flex; align-items:center; gap:.5rem;">
         <input type="checkbox" id="reschedule" name="reschedule" value="1">
         <label for="reschedule">Reschedule automatically now</label>
+      </div>
+      <div style="grid-column:1/-1">
+        <label>Description</label>
+        <textarea name="description" rows="3">{{ task.description or '' }}</textarea>
       </div>
     </div>
     <div style="margin-top:.75rem; display:flex; gap:.5rem;">
