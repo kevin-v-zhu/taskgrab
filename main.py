@@ -74,9 +74,9 @@ class Task(db.Model):
     scheduled_json = db.Column(db.Text, nullable=False, default='[]')
     # New fields for enhanced task management
     assigner = db.Column(db.String, nullable=True)  # Name of person who assigned the task
-    priority = db.Column(db.Integer, nullable=False, default=3)  # 1=Highest, 2=High, 3=Medium, 4=Low, 5=Lowest
     scheduling_flag = db.Column(db.String, nullable=True)  # 'red' (can't complete by due date) or 'orange' (spillover)
     scheduling_message = db.Column(db.String, nullable=True)  # Warning/info message for scheduling issues
+    manual_assignment_date = db.Column(db.Date, nullable=True)  # If set, task is pinned to this specific day
 
     assignee = db.relationship('Person', backref='tasks')
 
@@ -148,6 +148,13 @@ with app.app_context():
                 conn.execute(db.text("ALTER TABLE tasks ADD COLUMN scheduling_message VARCHAR"))
                 conn.commit()
             app.logger.info("Migration complete: scheduling_message column added")
+
+        if 'manual_assignment_date' not in task_columns:
+            app.logger.info("Running migration: adding manual_assignment_date column to tasks table")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE tasks ADD COLUMN manual_assignment_date DATE"))
+                conn.commit()
+            app.logger.info("Migration complete: manual_assignment_date column added")
 
     db.create_all()
     if Person.query.count() == 0:
@@ -240,6 +247,27 @@ with app.app_context():
                 time_slots=json.dumps(member.get("time_slots", {}))
             ))
         db.session.commit()
+    else:
+        # Update existing people with time_slots if they're empty
+        # This handles the case where people existed before time_slots was added
+        time_slots_by_name = {
+            "Vidya": {"1": [{"start": "12:00", "end": "15:00"}], "4": [{"start": "11:00", "end": "14:00"}]},
+            "Ariel": {"0": [{"start": "13:00", "end": "17:00"}], "4": [{"start": "14:00", "end": "17:00"}]},
+            "Ray": {"2": [{"start": "15:15", "end": "17:00"}], "4": [{"start": "10:00", "end": "14:00"}]},
+            "Viveka": {"0": [{"start": "13:30", "end": "15:30"}], "2": [{"start": "13:30", "end": "15:30"}], "3": [{"start": "11:45", "end": "13:45"}], "4": [{"start": "13:00", "end": "17:00"}]},
+            "Melinda": {"1": [{"start": "12:00", "end": "15:00"}], "3": [{"start": "10:00", "end": "15:00"}], "4": [{"start": "15:00", "end": "17:00"}]},
+            "Test Lila": {"0": [{"start": "16:00", "end": "17:00"}], "1": [{"start": "16:00", "end": "17:00"}], "2": [{"start": "16:00", "end": "17:00"}], "3": [{"start": "16:00", "end": "17:00"}], "4": [{"start": "16:00", "end": "17:00"}]},
+            "Test Kevin": {"0": [{"start": "16:00", "end": "17:00"}], "1": [{"start": "16:00", "end": "17:00"}], "2": [{"start": "16:00", "end": "17:00"}], "3": [{"start": "16:00", "end": "17:00"}], "4": [{"start": "16:00", "end": "17:00"}]},
+        }
+        updated = False
+        for person in Person.query.all():
+            current_slots = json.loads(person.time_slots or '{}')
+            if not current_slots and person.name in time_slots_by_name:
+                person.time_slots = json.dumps(time_slots_by_name[person.name])
+                updated = True
+                app.logger.info(f"Updated time_slots for {person.name}")
+        if updated:
+            db.session.commit()
 
 # -----------------------------
 # Utilities
@@ -604,33 +632,88 @@ def person_total_capacity_before_date(person_id: int, before_date: date, start_d
     return total
 
 
+def can_complete_before_due_date(person_id: int, estimated_hours: float, due_date: date, exclude_task_id: int = None) -> tuple:
+    """Check if person can complete task before due date.
+    Returns (success: bool, error_message: str).
+    """
+    if not due_date or not estimated_hours or estimated_hours <= 0:
+        return True, ""
+
+    total_capacity = 0.0
+    day_ptr = get_est_today()
+    # Include the due date itself (task can be completed ON the due date)
+    while day_ptr <= due_date:
+        total_capacity += person_remaining_capacity_on_day(person_id, day_ptr, exclude_task_id)
+        day_ptr += timedelta(days=1)
+
+    if total_capacity < estimated_hours:
+        return False, f"Not enough capacity. {estimated_hours:.1f}h needed but only {total_capacity:.1f}h available before due date."
+    return True, ""
+
+
 # Minimum chunk size for scheduling (in hours)
 # Tasks won't be split into chunks smaller than this, except for the final remaining portion
 MIN_SCHEDULE_CHUNK_HOURS = 1.0
 
 def reschedule_all_tasks_for_person(person_id: int):
-    """Reschedule all active tasks for a person based on priority and due date.
-    This ensures higher priority tasks get scheduled first.
+    """Reschedule all active tasks for a person using first-come-first-serve (FCFS) ordering.
+    Manually assigned tasks (with manual_assignment_date) are scheduled first on their designated day,
+    then regular tasks are scheduled in creation order (by task ID).
     """
-    # Get all active tasks for this person, ordered by priority then due date
-    tasks = Task.query.filter(
+    # Get all active tasks for this person, ordered by creation (FCFS)
+    all_tasks = Task.query.filter(
         Task.assignee_id == person_id,
         Task.status.notin_(['complete', 'completed', 'archived'])
     ).order_by(
-        Task.priority.asc().nullslast(),
-        Task.due_date.asc().nullslast()
+        Task.id.asc()
     ).all()
 
+    # Separate manually assigned tasks from regular tasks
+    manual_tasks = [t for t in all_tasks if t.manual_assignment_date]
+    regular_tasks = [t for t in all_tasks if not t.manual_assignment_date]
+
     # Clear all existing blocks for this person's tasks
-    for task in tasks:
+    for task in all_tasks:
         ScheduledBlock.query.filter_by(task_id=task.id).delete()
         task.scheduling_flag = None
         task.scheduling_message = None
 
     today = get_est_today()
 
-    # Schedule each task in priority order
-    for task in tasks:
+    # Schedule manually assigned tasks FIRST - they get priority on their designated day
+    for task in manual_tasks:
+        if not task.estimated_hours or task.estimated_hours <= 0:
+            task.scheduled_json = '[]'
+            continue
+
+        # Schedule on the manual assignment date
+        manual_date = task.manual_assignment_date
+        if manual_date < today:
+            # Manual date is in the past, skip scheduling but mark with message
+            task.scheduled_json = '[]'
+            task.scheduling_flag = 'orange'
+            task.scheduling_message = 'Manual assignment date is in the past'
+            continue
+
+        capacity = person_remaining_capacity_on_day(person_id, manual_date, exclude_task_id=task.id)
+        hours_to_schedule = min(capacity, float(task.estimated_hours))
+
+        blocks = []
+        if hours_to_schedule > 0:
+            blk = ScheduledBlock(task_id=task.id, person_id=person_id, day=manual_date, hours=hours_to_schedule)
+            db.session.add(blk)
+            blocks.append({"date": manual_date.isoformat(), "hours": round(hours_to_schedule, 2)})
+
+        task.scheduled_json = json.dumps(blocks)
+
+        # Check if task fully fits on manual date
+        if hours_to_schedule < task.estimated_hours:
+            remaining = task.estimated_hours - hours_to_schedule
+            task.scheduling_flag = 'orange'
+            task.scheduling_message = f"Only {hours_to_schedule:.1f}h of {task.estimated_hours:.1f}h fits on assigned day. {remaining:.1f}h unscheduled."
+
+    # Schedule regular tasks in FCFS order
+    for task in regular_tasks:
         if not task.estimated_hours or task.estimated_hours <= 0:
             task.scheduled_json = '[]'
             continue
@@ -692,7 +775,7 @@ def reschedule_all_tasks_for_person(person_id: int):
 
 def auto_schedule_task(task: Task):
     """Fill ScheduledBlock rows for task based on assignee weekly_hours and estimated_hours.
-    Triggers a full reschedule for the assignee to respect priority ordering.
+    Triggers a full reschedule for the assignee using FCFS ordering.
     """
     if not task.assignee_id:
         ScheduledBlock.query.filter_by(task_id=task.id).delete()
@@ -702,7 +785,7 @@ def auto_schedule_task(task: Task):
         db.session.commit()
         return
 
-    # Reschedule all tasks for this person to respect priority order
+    # Reschedule all tasks for this person in FCFS order
     reschedule_all_tasks_for_person(task.assignee_id)
 
 
@@ -815,7 +898,12 @@ def task_detail(task_id: int):
     task = Task.query.get_or_404(task_id)
     people = Person.query.order_by(Person.name).all()
     blocks = ScheduledBlock.query.filter_by(task_id=task.id).order_by(ScheduledBlock.day.asc()).all()
-    return render_template_string(TASK_HTML, task=task, people=people, blocks=blocks, WEEKDAY_LABELS=WEEKDAY_LABELS, json=json)
+    people_json = json.dumps([{
+        'id': p.id,
+        'name': p.name,
+        'time_slots': json.loads(p.time_slots or '{}')
+    } for p in people])
+    return render_template_string(TASK_HTML, task=task, people=people, blocks=blocks, WEEKDAY_LABELS=WEEKDAY_LABELS, json=json, today=get_est_today(), people_json=people_json)
 
 # -----------------------------
 # Routes: APIs (HTMX-friendly)
@@ -827,10 +915,13 @@ def api_create_task():
     if not title:
         abort(400, description='Title required')
     due_date = parse_date(data.get('due_date'))
+    # Validate due date is not in the past
+    if due_date and due_date < get_est_today():
+        abort(400, description='Due date cannot be in the past')
     description = data.get('description') or ''
     estimated_hours = float(data.get('estimated_hours') or 0)
-    priority = int(data.get('priority') or 3)
     assigner = (data.get('assigner') or '').strip() or None
+    manual_assignment_date = parse_date(data.get('manual_assignment_date'))
 
     assignee_raw = data.get('assignee_id')
     up_for_grabs = True
@@ -848,6 +939,12 @@ def api_create_task():
             assignee_id = person.id
             up_for_grabs = False
 
+    # Validate capacity before creating task (only for non-manual assignments)
+    if assignee_id and not manual_assignment_date:
+        can_complete, error_msg = can_complete_before_due_date(assignee_id, estimated_hours, due_date)
+        if not can_complete:
+            abort(400, description=error_msg)
+
     task = Task(
         title=title,
         due_date=due_date,
@@ -856,8 +953,8 @@ def api_create_task():
         estimated_hours=estimated_hours,
         up_for_grabs=up_for_grabs,
         status='assigned' if assignee_id else 'assigned',
-        priority=priority,
-        assigner=assigner
+        assigner=assigner,
+        manual_assignment_date=manual_assignment_date
     )
     db.session.add(task)
     db.session.commit()
@@ -880,7 +977,11 @@ def api_update_task(task_id: int):
     if 'title' in data:
         task.title = (data.get('title') or '').strip() or task.title
     if 'due_date' in data:
-        task.due_date = parse_date(data.get('due_date'))
+        new_due_date = parse_date(data.get('due_date'))
+        # Validate due date is not in the past
+        if new_due_date and new_due_date < get_est_today():
+            abort(400, description='Due date cannot be in the past')
+        task.due_date = new_due_date
     if 'description' in data:
         task.description = data.get('description') or ''
     if 'estimated_hours' in data:
@@ -892,13 +993,10 @@ def api_update_task(task_id: int):
     # Handle new fields
     if 'status' in data:
         task.status = data.get('status') or 'assigned'
-    if 'priority' in data:
-        try:
-            task.priority = int(data.get('priority') or 3)
-        except ValueError:
-            task.priority = 3
     if 'assigner' in data:
         task.assigner = (data.get('assigner') or '').strip() or None
+    if 'manual_assignment_date' in data:
+        task.manual_assignment_date = parse_date(data.get('manual_assignment_date'))
 
     old_assignee_id = task.assignee_id
     old_assignee = Person.query.get(old_assignee_id) if old_assignee_id else None
@@ -931,11 +1029,17 @@ def api_update_task(task_id: int):
 
         assignee_changed = old_assignee_id != task.assignee_id
 
+    # Validate capacity before saving (only for non-manual assignments)
+    if task.assignee_id and not task.manual_assignment_date:
+        can_complete, error_msg = can_complete_before_due_date(task.assignee_id, task.estimated_hours, task.due_date, exclude_task_id=task.id)
+        if not can_complete:
+            abort(400, description=error_msg)
+
     db.session.commit()
 
-    # Auto-schedule if reschedule checkbox is checked or assignee changed
-    reschedule = data.get('reschedule') == '1' or data.get('reschedule') == 'true'
-    if reschedule or assignee_changed:
+    # Auto-schedule if assignee changed or manual assignment date changed
+    manual_date_changed = 'manual_assignment_date' in data
+    if assignee_changed or manual_date_changed:
         if task.assignee_id:
             auto_schedule_task(task)
 
@@ -994,18 +1098,17 @@ def api_person_schedule(person_id: int):
     time_slots = json.loads(person.time_slots or '{}')
     weekly_hours = json.loads(person.weekly_hours or '{}')
 
-    # Get all active tasks for this person
+    # Get all active tasks for this person (FCFS order)
     tasks = Task.query.filter(
         Task.assignee_id == person_id,
         Task.status.notin_(['complete', 'completed', 'archived'])
-    ).order_by(Task.priority.asc().nullslast(), Task.due_date.asc().nullslast()).all()
+    ).order_by(Task.id.asc()).all()
 
     tasks_data = [{
         'id': t.id,
         'title': t.title,
         'due_date': t.due_date.isoformat() if t.due_date else None,
         'estimated_hours': t.estimated_hours,
-        'priority': t.priority,
         'status': t.status,
         'scheduled_json': json.loads(t.scheduled_json or '[]'),
         'scheduling_flag': t.scheduling_flag,
@@ -1078,13 +1181,6 @@ label{ font-size:.85rem; color:var(--muted);}
 .task-card.flag-orange{ background-color: #ffedd5; }
 .scheduling-message{ font-size:.75rem; color:#dc2626; font-weight:600; margin-top:.25rem; }
 .scheduling-message.orange{ color:#ea580c; }
-/* Priority badges */
-.priority-badge{ display:inline-block; padding:.1rem .4rem; border-radius:.4rem; font-size:.7rem; font-weight:600; margin-left:.25rem; }
-.priority-1{ background:#fee2e2; color:#dc2626; }
-.priority-2{ background:#ffedd5; color:#ea580c; }
-.priority-3{ background:#fef3c7; color:#d97706; }
-.priority-4{ background:#dbeafe; color:#2563eb; }
-.priority-5{ background:#e0e7ff; color:#4f46e5; }
 .task-head{ display:flex; justify-content:space-between; align-items:center; gap:.5rem;}
 .task-title{ font-weight:700; font-size:1rem;}
 .task-meta{ font-size:.8rem; color:var(--muted); margin-top:.25rem;}
@@ -1125,11 +1221,11 @@ INDEX_HTML = """
       </div>
       <div>
         <label>Due date</label>
-        <input type="date" name="due_date" value="{{ today.isoformat() }}">
+        <input type="date" name="due_date" value="{{ today.isoformat() }}" min="{{ today.isoformat() }}">
       </div>
       <div>
         <label>Assignee</label>
-        <select name="assignee_id">
+        <select name="assignee_id" id="create-assignee" onchange="onCreateAssigneeChange(this)">
           <option value="-1">Up for grabs</option>
           <option value="-2">Auto-assign</option>
           {% for p in people %}<option value="{{p.id}}">{{p.name}}</option>{% endfor %}
@@ -1140,18 +1236,19 @@ INDEX_HTML = """
         <input name="estimated_hours" type="number" min="0" step="0.25" placeholder="e.g., 6">
       </div>
       <div>
-        <label>Priority</label>
-        <select name="priority">
-          <option value="1">1 - Highest</option>
-          <option value="2">2 - High</option>
-          <option value="3" selected>3 - Medium</option>
-          <option value="4">4 - Low</option>
-          <option value="5">5 - Lowest</option>
-        </select>
-      </div>
-      <div>
         <label>Assigned by</label>
         <input name="assigner" placeholder="Your name">
+      </div>
+      <div id="create-manual-section" style="display:none; grid-column:1/-1;">
+        <label style="display:flex; align-items:center; gap:.5rem; cursor:pointer;">
+          <input type="checkbox" id="create-manual-check" onchange="toggleCreateManualDays()">
+          Manual assignment (pick specific day)
+        </label>
+        <div id="create-manual-days" style="display:none; margin-top:.5rem;">
+          <select name="manual_assignment_date" id="create-manual-date">
+            <option value="">Select a working day...</option>
+          </select>
+        </div>
       </div>
       <div style="grid-column:1/-1">
         <label>Description</label>
@@ -1168,10 +1265,7 @@ INDEX_HTML = """
     {% for t in tasks if t.status != 'complete' %}
     <div class="{{ task_css(t) }}">
       <div class="task-head">
-        <div class="task-title">
-          {{ t.title }}
-          <span class="priority-badge priority-{{ t.priority or 3 }}">P{{ t.priority or 3 }}</span>
-        </div>
+        <div class="task-title">{{ t.title }}</div>
         <a class="badge" href="{{ url_for('task_detail', task_id=t.id) }}">Open</a>
       </div>
       <div class="task-meta">
@@ -1422,6 +1516,64 @@ INDEX_HTML = """
     // Run on page load
     document.addEventListener('DOMContentLoaded', linkifyDescriptions);
     linkifyDescriptions();
+
+    // Manual assignment functions for create form
+    function onCreateAssigneeChange(selectEl) {
+      const personId = selectEl.value;
+      const section = document.getElementById('create-manual-section');
+      const checkbox = document.getElementById('create-manual-check');
+      const daysDiv = document.getElementById('create-manual-days');
+
+      if (personId > 0) {
+        section.style.display = 'block';
+        populateWorkingDays(personId, 'create-manual-date');
+      } else {
+        section.style.display = 'none';
+        checkbox.checked = false;
+        daysDiv.style.display = 'none';
+      }
+    }
+
+    function toggleCreateManualDays() {
+      const checked = document.getElementById('create-manual-check').checked;
+      document.getElementById('create-manual-days').style.display = checked ? 'block' : 'none';
+      if (!checked) {
+        document.getElementById('create-manual-date').value = '';
+      }
+    }
+
+    function populateWorkingDays(personId, selectId) {
+      const person = peopleData.find(p => p.id == personId);
+      const select = document.getElementById(selectId);
+      select.innerHTML = '<option value="">Select a working day...</option>';
+
+      if (!person || !person.time_slots) return;
+
+      // Get current week dates (Mon-Fri) and next week
+      const today = new Date();
+      const monday = new Date(today);
+      monday.setDate(today.getDate() - ((today.getDay() + 6) % 7)); // Get Monday of current week
+
+      // Show 2 weeks of working days
+      for (let i = 0; i < 14; i++) {
+        const d = new Date(monday);
+        d.setDate(monday.getDate() + i);
+
+        // Skip if date is in the past
+        if (d < new Date(today.toDateString())) continue;
+
+        // Skip weekends (Sat=6, Sun=0)
+        if (d.getDay() === 0 || d.getDay() === 6) continue;
+
+        const dayIdx = d.getDay() - 1; // Convert to Mon=0 format
+
+        if (person.time_slots[dayIdx.toString()]) {
+          const dateStr = d.toISOString().split('T')[0];
+          const label = d.toLocaleDateString('en-US', {weekday: 'short', month: 'short', day: 'numeric'});
+          select.innerHTML += '<option value="' + dateStr + '">' + label + '</option>';
+        }
+      }
+    }
   </script>
 </div>
 </body>
@@ -1523,16 +1675,15 @@ TASK_HTML = """
       </div>
       <div>
         <label>Due date</label>
-        <input type="date" name="due_date" value="{{ task.due_date.isoformat() if task.due_date else '' }}">
+        <input type="date" name="due_date" value="{{ task.due_date.isoformat() if task.due_date else '' }}" min="{{ today.isoformat() }}">
       </div>
       <div>
         <label>Assignee</label>
-        <select name="assignee_id">
+        <select name="assignee_id" id="edit-assignee" onchange="onEditAssigneeChange(this)">
           <option value="-1" {% if task.up_for_grabs %}selected{% endif %}>Up for grabs</option>
           <option value="-2">Auto-assign</option>
           {% for p in people %}<option value="{{p.id}}" {% if task.assignee_id==p.id %}selected{% endif %}>{{p.name}}</option>{% endfor %}
         </select>
-        <div class="small">Change assignee and tick "Reschedule" to auto-fill based on working hours.</div>
       </div>
       <div>
         <label>Estimated hours</label>
@@ -1548,22 +1699,19 @@ TASK_HTML = """
         </select>
       </div>
       <div>
-        <label>Priority</label>
-        <select name="priority">
-          <option value="1" {% if task.priority == 1 %}selected{% endif %}>1 - Highest</option>
-          <option value="2" {% if task.priority == 2 %}selected{% endif %}>2 - High</option>
-          <option value="3" {% if (task.priority or 3) == 3 %}selected{% endif %}>3 - Medium</option>
-          <option value="4" {% if task.priority == 4 %}selected{% endif %}>4 - Low</option>
-          <option value="5" {% if task.priority == 5 %}selected{% endif %}>5 - Lowest</option>
-        </select>
-      </div>
-      <div>
         <label>Assigned by</label>
         <input name="assigner" value="{{ task.assigner or '' }}" placeholder="Name of assigner">
       </div>
-      <div style="display:flex; align-items:center; gap:.5rem;">
-        <input type="checkbox" id="reschedule" name="reschedule" value="1">
-        <label for="reschedule">Reschedule automatically now</label>
+      <div id="edit-manual-section" style="{% if task.assignee_id %}display:block;{% else %}display:none;{% endif %} grid-column:1/-1;">
+        <label style="display:flex; align-items:center; gap:.5rem; cursor:pointer;">
+          <input type="checkbox" id="edit-manual-check" onchange="toggleEditManualDays()" {% if task.manual_assignment_date %}checked{% endif %}>
+          Manual assignment (pick specific day)
+        </label>
+        <div id="edit-manual-days" style="{% if task.manual_assignment_date %}display:block;{% else %}display:none;{% endif %} margin-top:.5rem;">
+          <select name="manual_assignment_date" id="edit-manual-date">
+            <option value="">Select a working day...</option>
+          </select>
+        </div>
       </div>
       <div style="grid-column:1/-1">
         <label>Description</label>
@@ -1631,6 +1779,71 @@ function addRow(){
                   <td><input type="number" name="block_hours" min="0" step="0.25"></td>`;
   tbody.appendChild(tr);
 }
+
+// People data for manual assignment
+const peopleData = {{ people_json|safe }};
+const currentManualDate = '{{ task.manual_assignment_date.isoformat() if task.manual_assignment_date else '' }}';
+
+function onEditAssigneeChange(selectEl) {
+  const personId = selectEl.value;
+  const section = document.getElementById('edit-manual-section');
+  const checkbox = document.getElementById('edit-manual-check');
+  const daysDiv = document.getElementById('edit-manual-days');
+
+  if (personId > 0) {
+    section.style.display = 'block';
+    populateEditWorkingDays(personId);
+  } else {
+    section.style.display = 'none';
+    checkbox.checked = false;
+    daysDiv.style.display = 'none';
+  }
+}
+
+function toggleEditManualDays() {
+  const checked = document.getElementById('edit-manual-check').checked;
+  document.getElementById('edit-manual-days').style.display = checked ? 'block' : 'none';
+  if (!checked) {
+    document.getElementById('edit-manual-date').value = '';
+  }
+}
+
+function populateEditWorkingDays(personId) {
+  const person = peopleData.find(p => p.id == personId);
+  const select = document.getElementById('edit-manual-date');
+  select.innerHTML = '<option value="">Select a working day...</option>';
+
+  if (!person || !person.time_slots) return;
+
+  const today = new Date();
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+
+    if (d < new Date(today.toDateString())) continue;
+    if (d.getDay() === 0 || d.getDay() === 6) continue;
+
+    const dayIdx = d.getDay() - 1;
+
+    if (person.time_slots[dayIdx.toString()]) {
+      const dateStr = d.toISOString().split('T')[0];
+      const label = d.toLocaleDateString('en-US', {weekday: 'short', month: 'short', day: 'numeric'});
+      const selected = dateStr === currentManualDate ? ' selected' : '';
+      select.innerHTML += '<option value="' + dateStr + '"' + selected + '>' + label + '</option>';
+    }
+  }
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+  const assigneeSelect = document.getElementById('edit-assignee');
+  if (assigneeSelect && assigneeSelect.value > 0) {
+    populateEditWorkingDays(assigneeSelect.value);
+  }
+});
 </script>
 </body>
 </html>
