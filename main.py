@@ -968,6 +968,17 @@ def api_complete_task(task_id: int):
     send_task_completed_email(task)
     return redirect(url_for('archive'))
 
+@app.post('/api/tasks/<int:task_id>/uncomplete')
+def api_uncomplete_task(task_id: int):
+    """Undo task completion - restore task to assigned status."""
+    task = Task.query.get_or_404(task_id)
+    task.status = 'assigned'
+    db.session.commit()
+    # Re-schedule if task has an assignee
+    if task.assignee_id:
+        auto_schedule_task(task)
+    return redirect(url_for('index'))
+
 @app.post('/api/tasks/<int:task_id>/delete')
 def api_delete_task(task_id: int):
     task = Task.query.get_or_404(task_id)
@@ -1098,14 +1109,15 @@ INDEX_HTML = """
 <body>
 <header>
   <h1>Taskboard</h1>
-  <div style="font-size:0.8rem; color:#666; margin-left:1rem;">{{ est_datetime }} EST</div>
+  <div id="live-clock" style="font-size:0.8rem; color:#666; margin-left:1rem;">{{ est_datetime }} EST</div>
   <div class="controls" style="margin-left:auto;">
-    <button onclick="document.getElementById('newTask').toggleAttribute('hidden')">＋ New Task</button>
-    <a class="btn" href="{{ url_for('archive') }}">Completed Tasks</a>
+    <button onclick="document.getElementById('newTask').toggleAttribute('hidden')">New Task</button>
+    <button onclick="window.location.href='{{ url_for('archive') }}'">Completed Tasks</button>
   </div>
 </header>
 <div class="container">
-  <form id="newTask" method="post" action="{{ url_for('api_create_task') }}" hidden>
+  <form id="newTask" method="post" action="{{ url_for('api_create_task') }}" hidden style="background:#fff; border:2px solid #2563eb; border-radius:0.75rem; padding:1.25rem; margin-bottom:1.5rem; box-shadow:0 4px 12px rgba(37,99,235,0.15);">
+    <h2 style="margin:0 0 1rem 0; font-size:1.1rem; color:#2563eb;">Create New Task</h2>
     <div class="form-grid">
       <div>
         <label>Title</label>
@@ -1146,8 +1158,8 @@ INDEX_HTML = """
         <textarea name="description" rows="2" placeholder="Short context"></textarea>
       </div>
     </div>
-    <div style="margin-top:.5rem; display:flex; gap:.5rem;">
-      <button type="submit">Create</button>
+    <div style="margin-top:.75rem; display:flex; gap:.5rem;">
+      <button type="submit">Create Task</button>
       <button type="button" class="secondary" onclick="document.getElementById('newTask').hidden=true">Cancel</button>
     </div>
   </form>
@@ -1172,7 +1184,7 @@ INDEX_HTML = """
       {% if t.scheduling_message %}
       <div class="scheduling-message {{ 'orange' if t.scheduling_flag == 'orange' else '' }}">⚠️ {{ t.scheduling_message }}</div>
       {% endif %}
-      {% if t.description %}<div style="margin-top:.4rem;">{{ t.description }}</div>{% endif %}
+      {% if t.description %}<div class="task-description" style="margin-top:.4rem;">{{ t.description }}</div>{% endif %}
       <form method="post" action="{{ url_for('api_complete_task', task_id=t.id) }}" style="margin-top:.6rem; display:flex; gap:.5rem;">
         <button>Mark complete</button>
         <form method="post" action="{{ url_for('api_delete_task', task_id=t.id) }}">
@@ -1365,6 +1377,51 @@ INDEX_HTML = """
       html += '</div>';
       container.innerHTML = html;
     }
+
+    // Live clock update
+    function updateClock() {
+      const clockEl = document.getElementById('live-clock');
+      if (clockEl) {
+        const now = new Date();
+        const options = {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+          timeZone: 'America/New_York'
+        };
+        const formatted = now.toLocaleString('en-US', options) + ' EST';
+        clockEl.textContent = formatted;
+      }
+    }
+    // Update clock every second
+    setInterval(updateClock, 1000);
+    // Initial update
+    updateClock();
+
+    // Convert URLs in text to clickable links
+    function linkifyText(text) {
+      const urlPattern = /(https?:\/\/[^\s<]+)/g;
+      return text.replace(urlPattern, '<a href="$1" target="_blank" rel="noopener noreferrer" style="color:#2563eb; text-decoration:underline;">$1</a>');
+    }
+
+    // Apply linkify to all task descriptions
+    function linkifyDescriptions() {
+      const descriptions = document.querySelectorAll('.task-description');
+      descriptions.forEach(el => {
+        if (!el.dataset.linkified) {
+          el.innerHTML = linkifyText(el.textContent);
+          el.dataset.linkified = 'true';
+        }
+      });
+    }
+
+    // Run on page load
+    document.addEventListener('DOMContentLoaded', linkifyDescriptions);
+    linkifyDescriptions();
   </script>
 </div>
 </body>
@@ -1383,8 +1440,8 @@ ARCHIVE_HTML = """
 <body>
 <header>
   <h1>Completed Tasks</h1>
-  <div class="controls">
-    <a class="btn" href="{{ url_for('index') }}">← Back to board</a>
+  <div class="controls" style="margin-left:auto;">
+    <a class="btn" href="{{ url_for('index') }}">Back to board</a>
   </div>
 </header>
 <div class="container">
@@ -1395,14 +1452,41 @@ ARCHIVE_HTML = """
         <div class="task-title">{{ t.title }}</div>
       </div>
       <div class="task-meta">Completed · {% if t.due_date %}Due was {{ t.due_date.strftime('%b %d, %Y') }}{% else %}No due date{% endif %}</div>
+      {% if t.assignee %}<div class="task-meta">Assignee: {{ t.assignee.name }}</div>{% endif %}
       {% if t.assigner %}<div class="task-meta">Assigned by: {{ t.assigner }}</div>{% endif %}
-      {% if t.description %}<div style="margin-top:.4rem;">{{ t.description }}</div>{% endif %}
+      {% if t.estimated_hours %}<div class="task-meta">Estimated: {{ '%.2f'|format(t.estimated_hours) }}h</div>{% endif %}
+      {% if t.description %}<div class="task-description" style="margin-top:.4rem;">{{ t.description }}</div>{% endif %}
+      <form method="post" action="{{ url_for('api_uncomplete_task', task_id=t.id) }}" style="margin-top:.6rem;">
+        <button class="secondary">Undo Complete</button>
+      </form>
     </div>
     {% else %}
     <p class="small">No completed tasks yet.</p>
     {% endfor %}
   </div>
 </div>
+<script>
+  // Convert URLs in text to clickable links
+  function linkifyText(text) {
+    const urlPattern = /(https?:\/\/[^\s<]+)/g;
+    return text.replace(urlPattern, '<a href="$1" target="_blank" rel="noopener noreferrer" style="color:#2563eb; text-decoration:underline;">$1</a>');
+  }
+
+  // Apply linkify to all task descriptions
+  function linkifyDescriptions() {
+    const descriptions = document.querySelectorAll('.task-description');
+    descriptions.forEach(el => {
+      if (!el.dataset.linkified) {
+        el.innerHTML = linkifyText(el.textContent);
+        el.dataset.linkified = 'true';
+      }
+    });
+  }
+
+  // Run on page load
+  document.addEventListener('DOMContentLoaded', linkifyDescriptions);
+  linkifyDescriptions();
+</script>
 </body>
 </html>
 """.replace("{{ BASE_CSS }}", "" + BASE_CSS)
@@ -1430,7 +1514,8 @@ TASK_HTML = """
   </div>
   {% endif %}
 
-  <form method="post" action="{{ url_for('api_update_task', task_id=task.id) }}">
+  <form method="post" action="{{ url_for('api_update_task', task_id=task.id) }}" style="background:#fff; border:2px solid #2563eb; border-radius:0.75rem; padding:1.25rem; margin-bottom:1.5rem; box-shadow:0 4px 12px rgba(37,99,235,0.15);">
+    <h2 style="margin:0 0 1rem 0; font-size:1.1rem; color:#2563eb;">Edit Task</h2>
     <div class="form-grid">
       <div>
         <label>Title</label>
