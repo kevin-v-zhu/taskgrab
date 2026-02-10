@@ -35,6 +35,7 @@ elif database_url.startswith('postgresql://') and '+' not in database_url.split(
     database_url = database_url.replace('postgresql://', 'postgresql+psycopg://', 1)
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'pool_pre_ping': True}
 
 # Email Configuration
 app.config['MAIL_ENABLED'] = os.environ.get('MAIL_ENABLED', 'false').lower() == 'true'
@@ -368,8 +369,8 @@ def send_email(to_addresses, subject, body_plain, body_html=None):
         if body_html:
             msg.attach(MIMEText(body_html, 'html'))
 
-        # Connect and send
-        server = smtplib.SMTP(app.config['MAIL_SERVER'], app.config['MAIL_PORT'])
+        # Connect and send (timeout prevents gunicorn worker from hanging)
+        server = smtplib.SMTP(app.config['MAIL_SERVER'], app.config['MAIL_PORT'], timeout=10)
         server.starttls()
         server.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
         server.sendmail(app.config['MAIL_DEFAULT_SENDER'], to_addresses, msg.as_string())
