@@ -1269,13 +1269,11 @@ INDEX_HTML = """
         <div class="task-title">{{ t.title }}</div>
         <a class="badge" href="{{ url_for('task_detail', task_id=t.id) }}">Open</a>
       </div>
-      <div class="task-meta">
-        {% if t.due_date %}Due: {{ t.due_date.strftime('%b %d, %Y') }}{% else %}No due date{% endif %} ·
-        {% if t.up_for_grabs %}<strong>Up for grabs</strong>{% else %}Assignee: {{ t.assignee.name }}{% endif %}
-        {% if t.estimated_hours %} · Est: {{ '%.2f'|format(t.estimated_hours) }}h{% endif %}
-        {% if t.assigner %} · By: {{ t.assigner }}{% endif %}
-      </div>
-      <div class="task-meta">Status: {{ t.status|replace('_', ' ')|title }}</div>
+      <div class="task-meta">{% if t.up_for_grabs %}<strong>Up for grabs</strong>{% else %}<strong>Assignee:</strong> {{ t.assignee.name }}{% endif %}</div>
+      <div class="task-meta">{% if t.due_date %}<strong>Due:</strong> {{ t.due_date.strftime('%b %d, %Y') }}{% else %}<strong>Due:</strong> No due date{% endif %}</div>
+      {% if t.estimated_hours %}<div class="task-meta"><strong>Est:</strong> {{ '%.2f'|format(t.estimated_hours) }}h</div>{% endif %}
+      {% if t.assigner %}<div class="task-meta"><strong>By:</strong> {{ t.assigner }}</div>{% endif %}
+      <div class="task-meta"><strong>Status:</strong> {{ t.status|replace('_', ' ')|title }}</div>
       {% if t.scheduling_message %}
       <div class="scheduling-message {{ 'orange' if t.scheduling_flag == 'orange' else '' }}">⚠️ {{ t.scheduling_message }}</div>
       {% endif %}
