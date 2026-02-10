@@ -1,5 +1,5 @@
 # =============================
-# app.py — Minimal Public Taskboard (Flask + SQLite + HTMX)
+# app.py — Public Taskboard (Flask + SQLite + HTMX)
 # =============================
 # Run locally:
 #   pip install flask==3.0.0 flask_sqlalchemy==3.1.1 sqlalchemy==2.0.23 python-dateutil==2.9.0.post0
@@ -192,8 +192,8 @@ with app.app_context():
         # Day indices: 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
         team_members = [
             {
-                "name": "Vidya",
-                "email": "vidya22@sas.upenn.edu",
+                "name": "Alice",
+                "email": "alice@example.com",
                 "schedule": {"0": 0, "1": 3, "2": 0, "3": 0, "4": 3, "5": 0, "6": 0},
                 "time_slots": {
                     "1": [{"start": "12:00", "end": "15:00"}],  # Tuesday 12-3pm
@@ -201,8 +201,8 @@ with app.app_context():
                 }
             },
             {
-                "name": "Ariel",
-                "email": "fariel@sas.upenn.edu",
+                "name": "Bob",
+                "email": "bob@example.com",
                 "schedule": {"0": 4, "1": 0, "2": 0, "3": 0, "4": 3, "5": 0, "6": 0},
                 "time_slots": {
                     "0": [{"start": "13:00", "end": "17:00"}],  # Monday 1-5pm
@@ -210,8 +210,8 @@ with app.app_context():
                 }
             },
             {
-                "name": "Ray",
-                "email": "ruitian@wharton.upenn.edu",
+                "name": "Carol",
+                "email": "carol@example.com",
                 "schedule": {"0": 0, "1": 0, "2": 1.75, "3": 0, "4": 4, "5": 0, "6": 0},
                 "time_slots": {
                     "2": [{"start": "15:15", "end": "17:00"}],  # Wednesday 3:15-5pm
@@ -219,8 +219,8 @@ with app.app_context():
                 }
             },
             {
-                "name": "Viveka",
-                "email": "vsinha@wharton.upenn.edu",
+                "name": "Dana",
+                "email": "dana@example.com",
                 "schedule": {"0": 2, "1": 0, "2": 2, "3": 2, "4": 4, "5": 0, "6": 0},
                 "time_slots": {
                     "0": [{"start": "13:30", "end": "15:30"}],  # Monday 1:30-3:30pm
@@ -230,8 +230,8 @@ with app.app_context():
                 }
             },
             {
-                "name": "Melinda",
-                "email": "melimei@wharton.upenn.edu",
+                "name": "Eve",
+                "email": "eve@example.com",
                 "schedule": {"0": 0, "1": 3, "2": 0, "3": 5, "4": 2, "5": 0, "6": 0},
                 "time_slots": {
                     "1": [{"start": "12:00", "end": "15:00"}],  # Tuesday 12-3pm
@@ -240,8 +240,8 @@ with app.app_context():
                 }
             },
             {
-                "name": "Test Lila",
-                "email": "ldimasi@wharton.upenn.edu",
+                "name": "Test Frank",
+                "email": "frank@example.com",
                 "schedule": {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1, "5": 0, "6": 0},
                 "time_slots": {
                     "0": [{"start": "16:00", "end": "17:00"}],  # Monday 4-5pm
@@ -252,8 +252,8 @@ with app.app_context():
                 }
             },
             {
-                "name": "Test Kevin",
-                "email": "kvzhu@wharton.upenn.edu",
+                "name": "Test Grace",
+                "email": "grace@example.com",
                 "schedule": {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1, "5": 0, "6": 0},
                 "time_slots": {
                     "0": [{"start": "16:00", "end": "17:00"}],  # Monday 4-5pm
@@ -277,13 +277,13 @@ with app.app_context():
         # Update existing people with time_slots if they're empty
         # This handles the case where people existed before time_slots was added
         time_slots_by_name = {
-            "Vidya": {"1": [{"start": "12:00", "end": "15:00"}], "4": [{"start": "11:00", "end": "14:00"}]},
-            "Ariel": {"0": [{"start": "13:00", "end": "17:00"}], "4": [{"start": "14:00", "end": "17:00"}]},
-            "Ray": {"2": [{"start": "15:15", "end": "17:00"}], "4": [{"start": "10:00", "end": "14:00"}]},
-            "Viveka": {"0": [{"start": "13:30", "end": "15:30"}], "2": [{"start": "13:30", "end": "15:30"}], "3": [{"start": "11:45", "end": "13:45"}], "4": [{"start": "13:00", "end": "17:00"}]},
-            "Melinda": {"1": [{"start": "12:00", "end": "15:00"}], "3": [{"start": "10:00", "end": "15:00"}], "4": [{"start": "15:00", "end": "17:00"}]},
-            "Test Lila": {"0": [{"start": "16:00", "end": "17:00"}], "1": [{"start": "16:00", "end": "17:00"}], "2": [{"start": "16:00", "end": "17:00"}], "3": [{"start": "16:00", "end": "17:00"}], "4": [{"start": "16:00", "end": "17:00"}]},
-            "Test Kevin": {"0": [{"start": "16:00", "end": "17:00"}], "1": [{"start": "16:00", "end": "17:00"}], "2": [{"start": "16:00", "end": "17:00"}], "3": [{"start": "16:00", "end": "17:00"}], "4": [{"start": "16:00", "end": "17:00"}]},
+            "Alice": {"1": [{"start": "12:00", "end": "15:00"}], "4": [{"start": "11:00", "end": "14:00"}]},
+            "Bob": {"0": [{"start": "13:00", "end": "17:00"}], "4": [{"start": "14:00", "end": "17:00"}]},
+            "Carol": {"2": [{"start": "15:15", "end": "17:00"}], "4": [{"start": "10:00", "end": "14:00"}]},
+            "Dana": {"0": [{"start": "13:30", "end": "15:30"}], "2": [{"start": "13:30", "end": "15:30"}], "3": [{"start": "11:45", "end": "13:45"}], "4": [{"start": "13:00", "end": "17:00"}]},
+            "Eve": {"1": [{"start": "12:00", "end": "15:00"}], "3": [{"start": "10:00", "end": "15:00"}], "4": [{"start": "15:00", "end": "17:00"}]},
+            "Test Frank": {"0": [{"start": "16:00", "end": "17:00"}], "1": [{"start": "16:00", "end": "17:00"}], "2": [{"start": "16:00", "end": "17:00"}], "3": [{"start": "16:00", "end": "17:00"}], "4": [{"start": "16:00", "end": "17:00"}]},
+            "Test Grace": {"0": [{"start": "16:00", "end": "17:00"}], "1": [{"start": "16:00", "end": "17:00"}], "2": [{"start": "16:00", "end": "17:00"}], "3": [{"start": "16:00", "end": "17:00"}], "4": [{"start": "16:00", "end": "17:00"}]},
         }
         updated = False
         for person in Person.query.all():
@@ -2020,7 +2020,7 @@ if __name__ == '__main__':
     app.run(debug=True)
 
 # =============================
-# requirements.txt (place this in a separate file when deploying)
+# requirements.txt 
 # =============================
 # flask==3.0.0
 # flask_sqlalchemy==3.1.1
@@ -2029,7 +2029,7 @@ if __name__ == '__main__':
 # python-dateutil==2.9.0.post0
 
 # =============================
-# render.yaml — one-click deploy on Render
+# render.yaml 
 # =============================
 # services:
 #   - type: web
