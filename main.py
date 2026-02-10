@@ -36,14 +36,31 @@ elif database_url.startswith('postgresql://') and '+' not in database_url.split(
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Email Configuration
-app.config['MAIL_ENABLED'] = os.environ.get('MAIL_ENABLED', 'false').lower() == 'true'
-app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', 'smtp.aol.com')
-app.config['MAIL_PORT'] = int(os.environ.get('MAIL_PORT', '587'))
-app.config['MAIL_USE_TLS'] = os.environ.get('MAIL_USE_TLS', 'true').lower() == 'true'
-app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', '')
-app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', '')
+# =============================
+# Notification Configuration
+# =============================
+# Set to 1 to enable, 0 to disable
+emails_enabled = int(os.environ.get('EMAILS_ENABLED', '0'))
+slack_enabled  = int(os.environ.get('SLACK_ENABLED',  '0'))
+
+# --- Email settings (only used when emails_enabled = 1) ---
+app.config['MAIL_SERVER']         = os.environ.get('MAIL_SERVER', 'smtp.aol.com')
+app.config['MAIL_PORT']           = int(os.environ.get('MAIL_PORT', '587'))
+app.config['MAIL_USE_TLS']        = os.environ.get('MAIL_USE_TLS', 'true').lower() == 'true'
+app.config['MAIL_USERNAME']       = os.environ.get('MAIL_USERNAME', '')
+app.config['MAIL_PASSWORD']       = os.environ.get('MAIL_PASSWORD', '')
 app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_DEFAULT_SENDER', '')
+
+# --- Slack settings (only used when slack_enabled = 1) ---
+# Setup instructions:
+#   1. Create a Slack App at https://api.slack.com/apps
+#   2. Add "chat:write" bot scope under OAuth & Permissions
+#   3. Install app to workspace, copy Bot Token (xoxb-...)
+#   4. Set SLACK_BOT_TOKEN env var
+#   5. Each team member needs their Slack Member ID in the Person model
+#      (Slack profile > "..." menu > "Copy member ID")
+# pip install slack_sdk  (add to requirements.txt when ready)
+app.config['SLACK_BOT_TOKEN'] = os.environ.get('SLACK_BOT_TOKEN', '')
 
 db = SQLAlchemy(app)
 
@@ -55,6 +72,7 @@ class Person(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String, nullable=False, unique=True)
     email = db.Column(db.String, nullable=True)
+    slack_id = db.Column(db.String, nullable=True)  # Slack Member ID (e.g., U01ABCDEF) for DM notifications
     # weekly_hours JSON mapping weekday index 0..6 -> float hours available that day
     weekly_hours = db.Column(db.Text, nullable=False, default='{}')
     # time_slots JSON mapping weekday index 0..6 -> list of {start: "HH:MM", end: "HH:MM"} slots
@@ -117,6 +135,13 @@ with app.app_context():
                 conn.execute(db.text("ALTER TABLE people ADD COLUMN time_slots TEXT DEFAULT '{}'"))
                 conn.commit()
             app.logger.info("Migration complete: time_slots column added")
+
+        if 'slack_id' not in columns:
+            app.logger.info("Running migration: adding slack_id column to people table")
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE people ADD COLUMN slack_id VARCHAR"))
+                conn.commit()
+            app.logger.info("Migration complete: slack_id column added")
 
     # Check if tasks table exists and migrate
     if 'tasks' in inspector.get_table_names():
@@ -326,9 +351,9 @@ def format_time_range_12h(start: str, end: str) -> str:
     return f"{format_time_12h(start)} - {format_time_12h(end)}"
 
 
-# -----------------------------
-# Email Service
-# -----------------------------
+# =============================
+# EMAIL NOTIFICATIONS
+# =============================
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -337,7 +362,7 @@ def send_email(to_addresses, subject, body_plain, body_html=None):
     """
     Send email with error handling. Returns True if successful, False otherwise.
     """
-    if not app.config['MAIL_ENABLED']:
+    if not emails_enabled:
         app.logger.info(f"Email disabled. Would send to {to_addresses}: {subject}")
         return False
 
@@ -533,6 +558,143 @@ Taskgrab Notification System
 """
 
     return send_email(task.assignee.email, subject, body_plain, body_html)
+
+
+# =============================
+# SLACK NOTIFICATIONS
+# =============================
+# Prerequisites (not yet installed):
+#   pip install slack_sdk
+#   Add 'slack_sdk' to requirements.txt
+#
+# Slack bot setup:
+#   1. Create a Slack App at https://api.slack.com/apps
+#   2. Under "OAuth & Permissions", add the "chat:write" bot scope
+#   3. Install the app to your workspace and copy the Bot Token (xoxb-...)
+#   4. Set the SLACK_BOT_TOKEN environment variable
+#   5. For each Person, set their slack_id to their Slack Member ID
+#      (find it in Slack: click on a user's profile > "..." > "Copy member ID")
+#
+# How Slack DMs work:
+#   from slack_sdk import WebClient
+#   client = WebClient(token=app.config['SLACK_BOT_TOKEN'])
+#   client.chat_postMessage(channel=person.slack_id, text="Your message here")
+#   The 'channel' parameter accepts a user ID to send a DM.
+
+
+def send_slack_message(user_slack_id, message):
+    """
+    Send a Slack DM to a user. Returns True if successful, False otherwise.
+    This is the low-level Slack sender (parallel to send_email for emails).
+
+    TODO: Implement when ready — uncomment the slack_sdk code below.
+    """
+    if not slack_enabled:
+        app.logger.info(f"Slack disabled. Would DM {user_slack_id}: {message}")
+        return False
+
+    if not app.config.get('SLACK_BOT_TOKEN'):
+        app.logger.warning("Slack bot token not configured")
+        return False
+
+    if not user_slack_id:
+        app.logger.info("No Slack ID provided, skipping Slack notification")
+        return False
+
+    # TODO: Uncomment when slack_sdk is installed and added to requirements.txt
+    # try:
+    #     from slack_sdk import WebClient
+    #     from slack_sdk.errors import SlackApiError
+    #     client = WebClient(token=app.config['SLACK_BOT_TOKEN'])
+    #     client.chat_postMessage(channel=user_slack_id, text=message)
+    #     app.logger.info(f"Slack DM sent to {user_slack_id}")
+    #     return True
+    # except SlackApiError as e:
+    #     app.logger.error(f"Slack API error sending to {user_slack_id}: {e.response['error']}")
+    #     return False
+    # except Exception as e:
+    #     app.logger.error(f"Failed to send Slack DM to {user_slack_id}: {str(e)}")
+    #     return False
+
+    app.logger.info(f"Slack placeholder: would DM {user_slack_id}: {message}")
+    return False
+
+
+def send_slack_task_assigned(task, person):
+    """Send Slack DM when a task is assigned to a person."""
+    if not person.slack_id:
+        return False
+    due_text = f"Due: {task.due_date.strftime('%B %d, %Y')}" if task.due_date else "No due date"
+    est_text = f"{task.estimated_hours:.2f} hours" if task.estimated_hours else "No estimate"
+    message = f":clipboard: *Task Assigned: {task.title}*\n{due_text} | Estimated: {est_text}\n{task.description or 'No description.'}"
+    return send_slack_message(person.slack_id, message)
+
+
+def send_slack_task_reassigned(task, old_person, new_person):
+    """Send Slack DMs when task is reassigned from one person to another."""
+    results = []
+    if old_person and old_person.slack_id:
+        message = f":arrows_counterclockwise: *Task Reassigned: {task.title}*\nThis task has been reassigned to {new_person.name if new_person else 'someone else'}."
+        results.append(send_slack_message(old_person.slack_id, message))
+    if new_person:
+        results.append(send_slack_task_assigned(task, new_person))
+    return any(results)
+
+
+def send_slack_task_up_for_grabs(task):
+    """Send Slack DM to everyone when task is marked 'up for grabs'."""
+    all_people = Person.query.all()
+    due_text = f"Due: {task.due_date.strftime('%B %d, %Y')}" if task.due_date else "No due date"
+    est_text = f"{task.estimated_hours:.2f} hours" if task.estimated_hours else "No estimate"
+    message = f":raising_hand: *Task Up For Grabs: {task.title}*\n{due_text} | Estimated: {est_text}\n{task.description or 'No description.'}"
+    results = []
+    for p in all_people:
+        if p.slack_id:
+            results.append(send_slack_message(p.slack_id, message))
+    return any(results)
+
+
+def send_slack_task_completed(task):
+    """Send Slack DM to assignee when task is marked complete."""
+    if not task.assignee or not task.assignee.slack_id:
+        return False
+    message = f":white_check_mark: *Task Completed: {task.title}*\nCongratulations! This task has been marked as completed."
+    return send_slack_message(task.assignee.slack_id, message)
+
+
+# =============================
+# NOTIFICATION DISPATCHERS
+# =============================
+# These are the functions that API routes should call.
+# They check both email and Slack toggles and dispatch accordingly.
+
+def notify_task_assigned(task, person):
+    """Notify a person that a task has been assigned to them (all channels)."""
+    if emails_enabled:
+        send_task_assigned_email(task, person)
+    if slack_enabled:
+        send_slack_task_assigned(task, person)
+
+def notify_task_reassigned(task, old_person, new_person):
+    """Notify old and new assignees about a reassignment (all channels)."""
+    if emails_enabled:
+        send_task_reassigned_email(task, old_person, new_person)
+    if slack_enabled:
+        send_slack_task_reassigned(task, old_person, new_person)
+
+def notify_task_up_for_grabs(task):
+    """Notify everyone that a task is up for grabs (all channels)."""
+    if emails_enabled:
+        send_task_up_for_grabs_email(task)
+    if slack_enabled:
+        send_slack_task_up_for_grabs(task)
+
+def notify_task_completed(task):
+    """Notify the assignee that a task has been completed (all channels)."""
+    if emails_enabled:
+        send_task_completed_email(task)
+    if slack_enabled:
+        send_slack_task_completed(task)
 
 
 def time_str_to_minutes(time_str: str) -> int:
@@ -963,10 +1125,10 @@ def api_create_task():
     # Auto-schedule if assigned
     if assignee_id:
         auto_schedule_task(task)
-        # Send assignment email
+        # Send assignment notification
         person = Person.query.get(assignee_id)
         if person:
-            send_task_assigned_email(task, person)
+            notify_task_assigned(task, person)
 
     return redirect(url_for('index'))
 
@@ -1044,17 +1206,17 @@ def api_update_task(task_id: int):
         if task.assignee_id:
             auto_schedule_task(task)
 
-    # Send email notifications for assignee changes
+    # Send notifications for assignee changes
     if assignee_changed:
         if task.up_for_grabs:
             # Task set to "up for grabs" - notify everyone
-            send_task_up_for_grabs_email(task)
+            notify_task_up_for_grabs(task)
         elif old_assignee_id and task.assignee_id:
             # Reassigned from one person to another
-            send_task_reassigned_email(task, old_assignee, new_assignee)
+            notify_task_reassigned(task, old_assignee, new_assignee)
         elif not old_assignee_id and task.assignee_id:
             # Newly assigned (was up for grabs, now has assignee)
-            send_task_assigned_email(task, new_assignee)
+            notify_task_assigned(task, new_assignee)
 
     # If status changed to complete, redirect to archive
     if task.status == 'complete':
@@ -1069,8 +1231,8 @@ def api_complete_task(task_id: int):
     task.scheduling_flag = None
     task.scheduling_message = None
     db.session.commit()
-    # Send completion email
-    send_task_completed_email(task)
+    # Send completion notification
+    notify_task_completed(task)
     return redirect(url_for('archive'))
 
 @app.post('/api/tasks/<int:task_id>/uncomplete')
