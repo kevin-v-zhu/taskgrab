@@ -72,6 +72,7 @@ class Task(db.Model):
     up_for_grabs = db.Column(db.Boolean, nullable=False, default=True)
     # convenience cache of JSON scheduled blocks for quick display (kept in sync with ScheduledBlock rows)
     scheduled_json = db.Column(db.Text, nullable=False, default='[]')
+    priority = db.Column(db.Integer, nullable=False, default=3, server_default='3')
     # New fields for enhanced task management
     assigner = db.Column(db.String, nullable=True)  # Name of person who assigned the task
     scheduling_flag = db.Column(db.String, nullable=True)  # 'red' (can't complete by due date) or 'orange' (spillover)
