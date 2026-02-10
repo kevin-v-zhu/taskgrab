@@ -1500,7 +1500,10 @@ INDEX_HTML = """
     // Convert URLs in text to clickable links
     function linkifyText(text) {
       const urlPattern = /(https?:\/\/[^\s<]+)/g;
-      return text.replace(urlPattern, '<a href="$1" target="_blank" rel="noopener noreferrer" style="color:#2563eb; text-decoration:underline;">$1</a>');
+      text = text.replace(urlPattern, '<a href="$1" target="_blank" rel="noopener noreferrer" style="color:#2563eb; text-decoration:underline;">$1</a>');
+      const wwwPattern = /(^|[\s>])(www\.[^\s<]+)/g;
+      text = text.replace(wwwPattern, '$1<a href="https://$2" target="_blank" rel="noopener noreferrer" style="color:#2563eb; text-decoration:underline;">$2</a>');
+      return text;
     }
 
     // Apply linkify to all task descriptions
